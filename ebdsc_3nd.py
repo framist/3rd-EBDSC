@@ -29,7 +29,7 @@ class EBDSC3rdLoader(Dataset):
     # 码元宽度的单位与 IQ 单位差 20 倍
     SYMBOL_WIDTH_UNIT = 20
 
-    def __init__(self, root_dir, code_map_offset=1, max_code_length=400):
+    def __init__(self, root_dir, code_map_offset=1):
         """
         Args:
             root_dir (str): 数据集根目录。
@@ -39,12 +39,10 @@ class EBDSC3rdLoader(Dataset):
                     - 1 -> <UNK> (未知符号)
                     - 2 -> <SOS> (起始符号)
                     - 3 -> <EOS> (终止符号)
-            max_code_length (int): 码序列的最大长度（用于填充）。
         """
         self.samples = []
         self.code_mapping = code_map_offset
         self.num_code_classes = 32 + code_map_offset  # 符号类别数
-        self.max_code_length = max_code_length
 
         for label in range(11):
             folder_path = os.path.join(root_dir, self.MOD_TYPE[label])
@@ -70,6 +68,7 @@ class EBDSC3rdLoader(Dataset):
 
         # 提取 code_sequence，映射为整数 ID
         code_sequence = df["code_sequence"].dropna().astype(int).to_numpy()
+        
         # 根据 code_mapping 将符号映射为唯一的整数 ID
         mapped_code_sequence = code_sequence + self.code_mapping
         code_sequence_aligned = repeat_and_pad_sequence(
@@ -253,6 +252,7 @@ def reverse_sequence_from_logits_batch(
 def collate_fn(batch):
     """
     自定义的 collate 函数，用于处理可变长度的 I/Q 数据和 code_sequence。
+    TODO 限制 IQ 与 code_sequence 的长度
     Args:
         batch (list): 包含多个样本，每个样本是一个字典。
     Returns:

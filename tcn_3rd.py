@@ -16,10 +16,13 @@ now = datetime.datetime.now().strftime('%m%d_%H-%M')
 from thop import clever_format, profile
 from torch.utils.data import random_split
 
+from my_tools import *
+seed_everything()
+
 import wandb
 from ebdsc_3nd import *
 
-NAME = 'EBDSC_3nd_AttnHead'
+NAME = '3nd_AttnHead'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -41,11 +44,19 @@ parser.add_argument('--max_epoch', type=int, default=50, help='max train epoch')
 parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
 parser.add_argument('--step_size', type=int, default=10, help='lr step size')
 
-parser.add_argument('--wandb', action='store_true', default=False, help='是否使用 wandb 记录')
-
 # 对照、消融实验的一些参数
 parser.add_argument('--model', type=str, default='modernTCN', help='backbone 模型选择')
 parser.add_argument('--manual', action='store_true', default=False, help='是否手动构建交织，需要 learnable_emb')
+
+# wandb
+parser.add_argument('--wandb', action='store_true', default=False, help='是否使用 wandb 记录')
+parser.add_argument('--name', type=str, default=NAME, help='wandb 实验名称')
+parser.add_argument('--tags', nargs='+', default=['default'], help='wandb 标签，可输入多个')
+
+# 3rd
+parser.add_argument('--true_sym_width', action='store_true', default=False, help='是否使用真实的符号宽度')
+parser.add_argument('--max_code_len', type=int, default=400, help='最大码元长度')
+parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0.3, 0.5], help='多任务损失权重 for MT, SW, CQ')
 
 parser_args = parser.parse_args()
 
@@ -71,14 +82,13 @@ MAX_TRAIN_EPOCH = parser_args.max_epoch
 
 IF_LAERNABLE_EMB = True
 
-NUM_CODE_CLASSES = 33
+NUM_CODE_CLASSES = 32 + 1
 NUM_MOD_CLASSES = 11
 PAD_IDX = 0  # 填充符号 ID
-MAX_CODE_LENGTH = 400  # true max 400
+CODE_MAP_OFFSET = 1  # 码元映射偏移
+MAX_CODE_LENGTH = parser_args.max_code_len
+MUTITASK_WEIGHTS = parser_args.mutitask_weights
 
-from my_tools import *
-
-seed_everything()
 
 # %% 模型、优化器选择
 if parser_args.model == 'modernTCN':
@@ -255,23 +265,24 @@ class MultiTaskLoss(nn.Module):
 
 if parser_args.wandb:
     wandb.init(
-        project="TCN 3nd",
-        name=NAME,
-        # track hyperparameters and run metadata
+        project="TCN 3rd fixed",
+        name=parser_args.name,
         config=parser_args,
-        tags=["MutiTask", "MT", "SW", "CQ"],
-        # tags=["MutiTask", "SW", "CQ"],
+        tags=parser_args.tags,
+        notes=NAME,
+        save_code=True,
     )
 
 
 root_dir = "../train_data/"  # 替换为实际路径
 
 # 创建 train_loader
-full_dataset = EBDSC3rdLoader(root_dir=root_dir, max_code_length=MAX_CODE_LENGTH)
+full_dataset = EBDSC3rdLoader(root_dir=root_dir, code_map_offset=CODE_MAP_OFFSET)
 
-# 8. 训练模型
 
-criterion = MultiTaskLoss(0.2, 0.3, 0.5, pad_idx=PAD_IDX)
+if 0. in MUTITASK_WEIGHTS:
+    print(f'Warning: 0 in {MUTITASK_WEIGHTS=}')
+criterion = MultiTaskLoss(*MUTITASK_WEIGHTS, pad_idx=PAD_IDX)
 
 # 定义训练集和验证集的比例，例如 80% 训练，20% 验证
 train_size = int(0.8 * len(full_dataset))
@@ -316,13 +327,13 @@ for batch in val_loader:
     flops, params = clever_format([flops, params], "%.3f")
     print(f"FLOPs: {flops}, Params: {params}")
     break
-    
+
 scaler = GradScaler()
 torch.cuda.empty_cache()
 model.to(device)
 model.train()
 best_score = 0.0
-t = tqdm(range(MAX_TRAIN_EPOCH), desc="Training", position=0)
+t = tqdm(range(MAX_TRAIN_EPOCH))
 scaler = torch.cuda.amp.GradScaler()
 for epoch in t:
     # - 训练阶段
@@ -357,9 +368,9 @@ for epoch in t:
 
         total_train_loss += loss.item()
 
-        t.set_description(f"Epoch [{epoch+1}/{MAX_TRAIN_EPOCH}], Train Loss: {loss.item():.4f}")
+        t.set_description(f"{NAME} Loss={loss.item():.2f}")
         # break
-    
+
     avg_train_loss = total_train_loss / len(train_loader)
 
     # - 验证阶段
@@ -368,6 +379,8 @@ for epoch in t:
     all_MT_scores = []
     all_SW_scores = []
     all_CQ_scores = []
+    all_mod_labels = []
+    all_mod_preds = []
     with torch.no_grad():
         for batch in val_loader:
             IQ_data = batch["IQ_data"].to(device)
@@ -376,7 +389,7 @@ for epoch in t:
             mod_type = batch["mod_type"].to(device)
             symbol_width = batch["symbol_width"].to(device)
             code_sequence = batch["code_sequence"].to(device)
-            
+
             mod_logits, symbol_width_pred, code_seq_logits = model(IQ_data,)
 
             # 计算损失
@@ -391,12 +404,15 @@ for epoch in t:
             )
             total_val_loss += loss.item()
 
-            code_sed_pred = reverse_sequence_from_logits_batch(
-                symbol_width_absl=symbol_width_pred * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,
-                # symbol_width_absl=symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,  # ! ture labal
-                expanded_logits=code_seq_logits,
-                pad=PAD_IDX,
-            )
+            if MUTITASK_WEIGHTS[2] > 0.0:
+                code_sed_pred = reverse_sequence_from_logits_batch(
+                    symbol_width_absl=(symbol_width if parser_args.true_sym_width else symbol_width_pred) * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,
+                    expanded_logits=code_seq_logits,
+                    pad=PAD_IDX,
+                )
+            else:
+                code_sed_pred = code_sequence
+                
             # 计算指标
             MT_scores = compute_MT_score(mod_logits, mod_type)
             SW_scores = compute_SW_score(symbol_width_pred, symbol_width)
@@ -405,37 +421,65 @@ for epoch in t:
             all_MT_scores.append(MT_scores)
             all_SW_scores.append(SW_scores)
             all_CQ_scores.append(CQ_scores)
-
+            all_mod_labels.append(mod_type)
+            all_mod_preds.append(mod_logits.argmax(dim=-1))
+            
     avg_val_loss = total_val_loss / len(val_loader)
 
     # 聚合指标
     all_MT_scores = torch.cat(all_MT_scores)  # [num_val_samples]
     all_SW_scores = torch.cat(all_SW_scores)  # [num_val_samples]
     all_CQ_scores = torch.cat(all_CQ_scores)  # [num_val_samples]
+    all_mod_labels = torch.cat(all_mod_labels)  # [num_val_samples]
+    all_mod_preds = torch.cat(all_mod_preds)  # [num_val_samples]
 
     # 计算加权总分
     sample_scores = 0.2 * all_MT_scores + 0.3 * all_SW_scores + 0.5 * all_CQ_scores
     avg_sample_score = sample_scores.mean().item()
 
-    print(
+    tqdm.write(
         f"Epoch [{epoch+1}/{MAX_TRAIN_EPOCH}], Train Loss: {avg_train_loss:.4f}, "
         f"Val Loss: {avg_val_loss:.4f}, Val Score: {avg_sample_score:.2f}, "
         f"MT: {all_MT_scores.mean().item():.2f}, SW: {all_SW_scores.mean().item():.2f}, CQ: {all_CQ_scores.mean().item():.2f}"
     )
-    
+
     if avg_sample_score > best_score:
         best_score = avg_sample_score
         torch.save(model.state_dict(), f"./saved_models/{NAME}_best.pth")
 
-    wandb.log(
-        {
-            "Train Loss": avg_train_loss,
-            "Val Loss": avg_val_loss,
-            "Val Score": avg_sample_score,
-            "MT": all_MT_scores.mean().item(),
-            "SW": all_SW_scores.mean().item(),
-            "CQ": all_CQ_scores.mean().item(),
-        }
-    )
+    log = {
+        "Train Loss": avg_train_loss,
+        "Val Loss": avg_val_loss,
+        "Score": avg_sample_score,
+    }
+
+    if MUTITASK_WEIGHTS[0] > 0.0:
+        log["MT"] = all_MT_scores.mean().item()
+    if MUTITASK_WEIGHTS[1] > 0.0:
+        log["SW"] = all_SW_scores.mean().item()
+    if MUTITASK_WEIGHTS[2] > 0.0:
+        log["CQ"] = all_CQ_scores.mean().item()
+    
+    if epoch % 10 == 0:
+        # 绘制 类别识别 混淆矩阵
+        cm = np.zeros((NUM_MOD_CLASSES, NUM_MOD_CLASSES))
+        for target, prediction in zip(all_mod_labels, all_mod_preds):
+            cm[target, prediction] += 1
+        fig, ax = plt.subplots()
+        ax.matshow(cm, cmap="viridis")
+        for (i, j), val in np.ndenumerate(cm):
+            ax.text(j, i, f"{val:.0f}", ha="center", va="center")
+        
+        plt.title("Modulation Type Confusion Matrix")
+        plt.xlabel("Prediction")
+        plt.ylabel("Target")
+        
+        plt.savefig(f"./saved_figs/{NAME}_confusion_matrix.png")
+        
+        log["类别识别混淆矩阵"] = fig
+    
+    wandb.log(log, step=epoch)
+    
+    
 
 wandb.finish()
