@@ -1,0 +1,439 @@
+# %%
+# Modern TCN 推荐参数
+import numpy as np
+from tqdm import tqdm
+from typing import List
+import torch
+from torch import nn, Tensor
+import torch.utils.data as Data
+from torch.cuda.amp import autocast, GradScaler
+
+# %matplotlib widget
+from typing import List
+import datetime
+now = datetime.datetime.now().strftime('%m%d_%H-%M')
+
+from ebdsc_3nd import *
+from torch.utils.data import random_split
+import wandb
+
+from thop import profile, clever_format
+
+NAME = 'EBDSC_3nd'
+
+# plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
+# plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
+
+import argparse
+parser = argparse.ArgumentParser(description='Code for 3nd EBDSC -- Wide-Value-Embs TCN -- by framist',
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument('--cuda', type=int, default=0, help='所使用的 cuda 设备，暂不支持多设备并行')
+parser.add_argument('--num_layers', type=int, default=24, help='layers of modernTCN')
+parser.add_argument('--d_model', type=int, default=128, help='d_model')
+parser.add_argument('--batch_size', type=int, default=50, help='batch size')
+parser.add_argument('--ratio', type=int, default=2, help='ffn ratio')
+parser.add_argument('--ls', type=int, default=51, help='large kernel sizes')
+parser.add_argument('--ss', type=int, default=5, help='small kernel size')
+parser.add_argument('--dp', type=float, default=0.5, help='drop out')
+parser.add_argument('--max_epoch', type=int, default=50, help='max train epoch')
+
+parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
+parser.add_argument('--step_size', type=int, default=10, help='lr step size')
+
+parser.add_argument('--wandb', action='store_true', default=False, help='是否使用 wandb 记录')
+
+# 对照、消融实验的一些参数
+parser.add_argument('--model', type=str, default='modernTCN', help='backbone 模型选择')
+parser.add_argument('--manual', action='store_true', default=False, help='是否手动构建交织，需要 learnable_emb')
+
+parser_args = parser.parse_args()
+
+use_cuda = True
+device = torch.device(f"cuda:{parser_args.cuda}" if (
+    use_cuda and torch.cuda.is_available()) else "cpu")
+# device = torch.device("cpu")
+print("CUDA Available: ", torch.cuda.is_available(), 'use:', device)
+
+
+BATCH_SIZE = parser_args.batch_size
+INPUT_CHANNELS = 2
+
+# kernel_size = 51  # 51 5 7 9 11 13 15 17 19 21 23 25 27 29 31 33 35
+POS_D = D = parser_args.d_model
+P = 1
+S = 1
+R = parser_args.ratio
+NUM_LAYERS = parser_args.num_layers
+DROP_OUT = parser_args.dp # dropout 仅指分类头的。不能在主干。ref. https://arxiv.org/abs/1801.05134v1
+
+MAX_TRAIN_EPOCH = parser_args.max_epoch
+
+IF_LAERNABLE_EMB = True
+
+NUM_CODE_CLASSES = 33
+NUM_MOD_CLASSES = 11
+PAD_IDX = 0  # 填充符号 ID
+
+from my_tools import *
+seed_everything()
+
+# %% 模型、优化器选择
+if parser_args.model == 'modernTCN':
+    NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+    # from TCNmodelPosAll import ModernTCN_DC
+    from ModernTCN import ModernTCN_MutiTask
+    # 不可结构重参数化：
+    # model = ModernTCN_DC(INPUT_CHANNELS, WINDOW_SIZE, TAG_LEN, D=D,
+    #                      P=P, S=S, kernel_size=kernel_size, r=R, num_layers=NUM_LAYERS, pos_D=POS_D).to(device)
+
+    # 可结构重参数化：
+    model = ModernTCN_MutiTask(
+            M=INPUT_CHANNELS, 
+            num_code_classes=NUM_CODE_CLASSES, 
+            num_mod_classes=11,
+            D=D,
+            ffn_ratio=R, 
+            num_layers=NUM_LAYERS, 
+            large_sizes=parser_args.ls,
+            small_size=parser_args.ss,
+            backbone_dropout=0.,
+            head_dropout=DROP_OUT,
+            stem = IF_LAERNABLE_EMB
+        ).to(device)
+
+
+    # * CNN 使用的优化器
+
+    learn_rate = parser_args.lr
+    lr_step_size = parser_args.step_size
+    # learn_rate = 4e-3
+    # learn_rate = 2e-4
+    # MIN_LR = 1e-4
+    # optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.99)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate)
+
+    # < 50  e 0.004
+    # < 100 e 0.002
+    # < 150 e 0.001
+    # < 200 e 0.0005
+    # < 250 e 0.00025
+    # < 300 e 0.000125
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5)
+
+
+elif parser_args.model == 'Transformer':
+    from models.Transformer import Model, Configs
+    configs = Configs()
+    if not IF_LAERNABLE_EMB:
+        D = 128 * 5
+        NAME = f'TF_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+        configs.d_model = D
+        configs.e_layers = NUM_LAYERS
+        configs.d_ff = D * R
+        configs.n_heads = 4
+        configs.dropout = DROP_OUT
+
+        model = Model(configs=configs, wide_value_emb=True).to(device)
+
+    else:
+        D = 128 * 2
+        NAME = f'TF_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+        configs.d_model = D
+        configs.e_layers = NUM_LAYERS
+        configs.d_ff = D * R
+        configs.n_heads = 2
+        configs.dropout = DROP_OUT
+
+        model = Model(configs=configs, wide_value_emb=False).to(device)
+
+    # * TF 使用的优化器
+    learn_rate = 0.
+    optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate)
+    lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 50 ** -1.5)
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+elif parser_args.model == 'iTransformer':
+    assert IF_LAERNABLE_EMB == True, "iTransformer 模型必须使用可学习的 emb. TODO"
+    D = 128 * 2
+    NAME = f'iTransformer_{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+    from models.iTransformer import Model, Configs
+    configs = Configs()
+    configs.e_layers = NUM_LAYERS
+    configs.d_ff = configs.d_model * R
+    configs.dropout = DROP_OUT
+
+    model = Model(configs=configs, wide_value_emb=False).to(device)
+
+    # * TF 使用的优化器
+    learn_rate = 0.
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate)
+    lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 50 ** -1.5) 
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+elif parser_args.model == 'TimesNet':
+    assert IF_LAERNABLE_EMB == True, "TimesNet 模型必须使用可学习的 emb. TODO"
+
+    D = 128
+    NAME = f'TimesNet_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+    from models.TimesNet import Model, Configs
+    configs = Configs()
+    configs.d_model = D
+    configs.e_layers = NUM_LAYERS
+    configs.d_ff = D * R
+    configs.dropout = DROP_OUT
+
+
+    model = Model(configs=configs, wide_value_emb=False).to(device)
+
+    # 优化器
+    learn_rate = 0.001
+    optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
+
+else:
+    raise ValueError('model 选择错误')
+
+# 定义 SubsetLoss
+class MultiTaskLoss(nn.Module):
+    def __init__(self, mod_weight=0.2, width_weight=0.3, seq_weight=0.5, pad_idx=0):
+        super().__init__()
+        # 归一化权重
+        total_weight = mod_weight + width_weight + seq_weight
+        self.mod_weight = mod_weight / total_weight
+        self.width_weight = width_weight / total_weight
+        self.seq_weight = seq_weight / total_weight
+        self.pad_idx = pad_idx
+
+    def forward(
+        self,
+        mod_logits,
+        symbol_width_pred,
+        code_seq_logits,
+        mod_labels,
+        symbol_width_labels,
+        code_seq_labels,
+        code_seq_masks,
+    ):
+        """
+        Args:
+            mod_logits (Tensor): [batch_size, num_mod_classes]
+            symbol_width_pred (Tensor): [batch_size]
+            code_seq_logits (Tensor): [batch_size, tgt_seq_len, num_code_classes + 1]
+            mod_labels (Tensor): [batch_size]
+            symbol_width_labels (Tensor): [batch_size]
+            code_seq_labels (Tensor): [batch_size, tgt_seq_len]
+            code_seq_masks (Tensor): [batch_size, tgt_seq_len]
+        Returns:
+            Tensor: 总损失
+        """
+        # 调制类型损失
+        mod_loss = F.cross_entropy(mod_logits, mod_labels)
+
+        # TODO 码元宽度损失
+        # width_loss = F.mse_loss(symbol_width_pred, symbol_width_labels)
+        width_loss = (torch.abs(symbol_width_pred - symbol_width_labels) / symbol_width_labels / 0.2).mean()
+
+        # 码序列损失
+        # 需要将预测的 logits 和 labels 进行适当的变形
+        # 计算交叉熵时忽略填充部分
+        batch_size, tgt_seq_len, num_classes = code_seq_logits.size()
+        
+        # 仅计算非填充部分
+        active_logits = code_seq_logits[code_seq_labels != self.pad_idx]
+        active_labels = code_seq_labels[code_seq_labels != self.pad_idx]
+
+        seq_loss = F.cross_entropy(active_logits, active_labels)
+        return (
+            self.mod_weight * mod_loss
+            + self.width_weight * width_loss
+            + self.seq_weight * seq_loss
+        )
+
+if parser_args.wandb:
+    wandb.init(
+        project="TCN 3nd",
+        name=NAME,
+        # track hyperparameters and run metadata
+        config=parser_args,
+        tags=["attenHead", "MutiTask"],
+    )
+
+max_code_length = 400  # true max 400
+
+root_dir = "../train_data/"  # 替换为实际路径
+
+# 创建 train_loader
+full_dataset = EBDSC3rdLoader(root_dir=root_dir, max_code_length=max_code_length)
+
+# 8. 训练模型
+
+criterion = MultiTaskLoss(0.2, 0.3, 0.5, pad_idx=PAD_IDX)
+# optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+# 定义训练集和验证集的比例，例如 80% 训练，20% 验证
+train_size = int(0.8 * len(full_dataset))
+val_size = len(full_dataset) - train_size
+
+# 随机划分数据集
+train_subset, val_subset = random_split(full_dataset, [train_size, val_size])
+
+print(f"Train samples: {len(train_subset)}, Val samples: {len(val_subset)}")
+
+# 创建训练集 DataLoader
+train_loader = DataLoader(
+    train_subset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    collate_fn=collate_fn,
+    num_workers=8,
+    pin_memory=bool(torch.cuda.is_available()),
+)
+
+# 创建验证集 DataLoader
+val_loader = DataLoader(
+    val_subset,
+    batch_size=BATCH_SIZE * 2,
+    shuffle=False,
+    collate_fn=collate_fn,
+    num_workers=8,
+    pin_memory=bool(torch.cuda.is_available()),
+)
+
+
+print(f"{NAME=}")
+print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+print(f"{model=}")
+
+# 5. 验证 DataLoader
+# 打印一个批次的数据形状
+for batch in val_loader:
+    print("IQ_data.shape:", batch["IQ_data"].shape)  # [batch_size, max_IQ_len, 2]
+
+    flops, params = profile(model, inputs=(batch["IQ_data"].to(device),))
+    flops, params = clever_format([flops, params], "%.3f")
+    print(f"FLOPs: {flops}, Params: {params}")
+    break
+    
+scaler = GradScaler()
+torch.cuda.empty_cache()
+model.to(device)
+model.train()
+best_score = 0.0
+t = tqdm(range(MAX_TRAIN_EPOCH), desc="Training", position=0)
+scaler = torch.cuda.amp.GradScaler()
+for epoch in t:
+    # - 训练阶段
+    model.train()
+    total_train_loss = 0
+    for batch in train_loader:
+        IQ_data = batch["IQ_data"].to(device)  # [batch_size, max_IQ_len, 2]
+        code_sequence_aligned = batch["code_sequence_aligned"].to(device)  # [batch_size, max_IQ_len]
+        code_mask = batch["code_mask"].to(device)  # [batch_size, max_code_len]
+        mod_type = batch["mod_type"].to(device)  # [batch_size]
+        symbol_width = batch["symbol_width"].to(device)  # [batch_size]
+
+        optimizer.zero_grad()
+
+        with torch.autocast(device_type="cuda"):
+            mod_logits, symbol_width_pred, code_seq_logits = model(IQ_data)
+
+            # 计算损失
+            loss = criterion(
+                mod_logits=mod_logits,
+                symbol_width_pred=symbol_width_pred,
+                code_seq_logits=code_seq_logits,
+                mod_labels=mod_type,
+                symbol_width_labels=symbol_width,
+                code_seq_labels=code_sequence_aligned,
+                code_seq_masks=code_mask,
+            )
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        total_train_loss += loss.item()
+
+        t.set_description(f"Epoch [{epoch+1}/{MAX_TRAIN_EPOCH}], Train Loss: {loss.item():.4f}")
+        # break
+    
+    avg_train_loss = total_train_loss / len(train_loader)
+
+    # - 验证阶段
+    model.eval()
+    total_val_loss = 0
+    all_MT_scores = []
+    all_SW_scores = []
+    all_CQ_scores = []
+    with torch.no_grad():
+        for batch in val_loader:
+            IQ_data = batch["IQ_data"].to(device)
+            code_sequence_aligned = batch["code_sequence_aligned"].to(device)
+            code_mask = batch["code_mask"].to(device)
+            mod_type = batch["mod_type"].to(device)
+            symbol_width = batch["symbol_width"].to(device)
+            code_sequence = batch["code_sequence"].to(device)
+            
+            mod_logits, symbol_width_pred, code_seq_logits = model(IQ_data,)
+
+            # 计算损失
+            loss = criterion(
+                mod_logits=mod_logits,
+                symbol_width_pred=symbol_width_pred,
+                code_seq_logits=code_seq_logits,
+                mod_labels=mod_type,
+                symbol_width_labels=symbol_width,
+                code_seq_labels=code_sequence_aligned,
+                code_seq_masks=code_mask,
+            )
+            total_val_loss += loss.item()
+
+            code_sed_pred = reverse_sequence_from_logits_batch(
+                symbol_width_absl=symbol_width_pred * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,
+                expanded_logits=code_seq_logits,
+                pad=PAD_IDX,
+            )
+            # 计算指标
+            MT_scores = compute_MT_score(mod_logits, mod_type)
+            SW_scores = compute_SW_score(symbol_width_pred, symbol_width)
+            CQ_scores = compute_CQ_score(code_sed_pred, code_sequence, pad_idx=PAD_IDX)
+
+            all_MT_scores.append(MT_scores)
+            all_SW_scores.append(SW_scores)
+            all_CQ_scores.append(CQ_scores)
+
+    avg_val_loss = total_val_loss / len(val_loader)
+
+    # 聚合指标
+    all_MT_scores = torch.cat(all_MT_scores)  # [num_val_samples]
+    all_SW_scores = torch.cat(all_SW_scores)  # [num_val_samples]
+    all_CQ_scores = torch.cat(all_CQ_scores)  # [num_val_samples]
+
+    # 计算加权总分
+    sample_scores = 0.2 * all_MT_scores + 0.3 * all_SW_scores + 0.5 * all_CQ_scores
+    avg_sample_score = sample_scores.mean().item()
+
+    print(
+        f"Epoch [{epoch+1}/{MAX_TRAIN_EPOCH}], Train Loss: {avg_train_loss:.4f}, "
+        f"Val Loss: {avg_val_loss:.4f}, Val Score: {avg_sample_score:.2f}, "
+        f"MT: {all_MT_scores.mean().item():.2f}, SW: {all_SW_scores.mean().item():.2f}, CQ: {all_CQ_scores.mean().item():.2f}"
+    )
+    
+    if avg_sample_score > best_score:
+        best_score = avg_sample_score
+        torch.save(model.state_dict(), f"./saved_models/{NAME}_best.pth")
+
+    wandb.log(
+        {
+            "Train Loss": avg_train_loss,
+            "Val Loss": avg_val_loss,
+            "Val Score": avg_sample_score,
+            "MT": all_MT_scores.mean().item(),
+            "SW": all_SW_scores.mean().item(),
+            "CQ": all_CQ_scores.mean().item(),
+        }
+    )
+
+wandb.finish()

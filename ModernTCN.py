@@ -4,6 +4,34 @@ import torch.nn.functional as F
 from einops import rearrange
 
 
+# Attention Pooling
+class AttentionPool(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.attention = nn.Linear(d_model, 1)
+        
+    def forward(self, x):
+        # x: [batch_size, seq_len, d_model]
+        scores = self.attention(x)  # [batch_size, seq_len, 1]
+        weights = F.softmax(scores, dim=1)  # [batch_size, seq_len, 1] 
+        global_feat = torch.sum(x * weights, dim=1)  # [batch_size, d_model]
+        return global_feat
+
+# CNN + Pooling
+class CNNPool(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.conv = nn.Conv1d(d_model, d_model, kernel_size=3, padding=1)
+        
+    def forward(self, x):
+        # x: [batch_size, seq_len, d_model]
+        x = x.transpose(1, 2)  # [batch_size, d_model, seq_len]
+        x = self.conv(x)
+        global_feat = F.adaptive_max_pool1d(x, 1).squeeze(-1)  # [batch_size, d_model]
+        return global_feat
+
+
+
 class LayerNorm(nn.Module):
 
     def __init__(self, channels, eps=1e-6, data_format="channels_last"):
@@ -204,16 +232,13 @@ class Stage(nn.Module):
         return x
 
 
-class ModernTCNnew(nn.Module):  # T 在预测任务当中为预测的长度，可以更换为输出的种类 num_classes
-    def __init__(self, M, num_classes, D=128, large_sizes=51, ffn_ratio=2, num_layers=24, 
-                 small_size=5, small_kernel_merged=False, backbone_dropout=0., head_dropout=0., stem=False):  # 如果能收敛就一点一点增加，在原来跑通的里面层数为
+class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长度，可以更换为输出的种类 num_classes
+    def __init__(self, *, M, num_code_classes, num_mod_classes, D=128, large_sizes=51, ffn_ratio=2, num_layers=24, 
+                 small_size=5, small_kernel_merged=False, backbone_dropout=0., head_dropout=0., stem=False
+                 ):  # 如果能收敛就一点一点增加，在原来跑通的里面层数为
         # M, L, num_classes,
-        super(ModernTCNnew, self).__init__()
+        super(ModernTCN_MutiTask, self).__init__()
         self.num_layers = num_layers
-        
-        # # RevIN
-        # self.revin = revin
-        # if self.revin: self.revin_layer = RevIN(c_in, affine=affine, subtract_last=subtract_last)
 
         # stem layer
         if stem:
@@ -222,16 +247,35 @@ class ModernTCNnew(nn.Module):  # T 在预测任务当中为预测的长度，�
                 nn.BatchNorm1d(D)
             )
 
-
         # backbone
         self.stages = Stage(ffn_ratio, num_layers, large_size=large_sizes, small_size=small_size, dmodel=D,
                             nvars=M, small_kernel_merged=small_kernel_merged, drop=backbone_dropout)
 
         # w/o pool
         # self.classificationhead = nn.Linear(D * M, num_classes)
-        self.classificationhead = nn.Sequential(
+        self.sortinghead = nn.Sequential(
+            nn.Linear(D * M, D * M),
+            nn.ReLU(),
             nn.Dropout(head_dropout),
-            nn.Linear(D * M, num_classes)
+            nn.Linear(D * M, num_code_classes)
+        )
+        
+        # 分类头：调制类型
+        self.mod_classifier = nn.Sequential(
+            AttentionPool(D * M),
+            nn.Linear(D * M, D * M),
+            nn.ReLU(),
+            nn.Dropout(head_dropout),
+            nn.Linear(D * M, num_mod_classes)
+        )
+
+        # 回归头：码元宽度
+        self.symbol_width_regressor = nn.Sequential(
+            AttentionPool(D * M),
+            nn.Linear(D * M, D * M),
+            nn.ReLU(),
+            nn.Dropout(head_dropout),
+            nn.Linear(D * M, 1),
         )
 
         # # with pool
@@ -267,54 +311,63 @@ class ModernTCNnew(nn.Module):  # T 在预测任务当中为预测的长度，�
         # cls1 = torch.max(x_emb, dim=1)[0]    # [B, M, D, N] -> [B, D, N]
 
         # 转换为 [64, 1024, 64]
-        cls1 = cls1.permute(0, 2, 1)  # [64, 64, 1024] -> [64, 1024, 64]
+        encoder_output = cls1.permute(0, 2, 1)  # [64, 64, 1024] -> [64, 1024, 64]
 
         # 输出为 [64, 1024,12]
         # [64, 1024, 1, 64] -> [64, 1024, 1, 12]
-        out1 = self.classificationhead(cls1)
+        code_seq_logits = self.sortinghead(encoder_output)
 
-        return out1
+        # 全局特征用于分类和回归
+        # TODO mean 池化待验证
+        global_feat = encoder_output # .mean(dim=1)  # [batch_size, d_model]
+
+        # 调制类型分类
+        mod_logits = self.mod_classifier(global_feat)  # [batch_size, num_mod_classes]
+
+        # 码元宽度回归
+        symbol_width = self.symbol_width_regressor(global_feat).squeeze(-1)  # [batch_size]
+        
+        return mod_logits, symbol_width, code_seq_logits
 
     def structural_reparam(self):
         for m in self.modules():
             if hasattr(m, 'merge_kernel'):
                 m.merge_kernel()
 
+# if __name__ == '__main__':
+#     from time import time
 
-if __name__ == '__main__':
-    from time import time
+#     past_series = torch.rand(10, 1024, 5, 128).cuda()
+#     # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
+#     model = ModernTCN_MutiTask(5, 12).cuda()
 
-    past_series = torch.rand(10, 1024, 5, 128).cuda()
-    # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
-    model = ModernTCNnew(5, 12).cuda()
+#     start = time()
+#     pred_series = model(past_series)
+#     end = time()
+#     print(pred_series.shape, f"time {end - start}")
 
-    start = time()
-    pred_series = model(past_series)
-    end = time()
-    print(pred_series.shape, f"time {end - start}")
+#     model.structural_reparam()
 
-    model.structural_reparam()
+#     start = time()
+#     pred_series = model(past_series)
+#     end = time()
 
-    start = time()
-    pred_series = model(past_series)
-    end = time()
-
-    print(pred_series.shape, f"time {end - start}")
+#     print(pred_series.shape, f"time {end - start}")
 
 
-    past_series2 = torch.rand(10, 1024, 5).cuda()
-    # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
-    model = ModernTCNnew(5, 12, stem=True).cuda()
+#     past_series2 = torch.rand(10, 1024, 5).cuda()
+#     # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
+#     model = ModernTCN_MutiTask(5, 12, stem=True).cuda()
 
-    start = time()
-    pred_series = model(past_series2)
-    end = time()
-    print(pred_series.shape, f"time {end - start}")
+#     start = time()
+#     pred_series = model(past_series2)
+#     end = time()
+#     print(pred_series.shape, f"time {end - start}")
 
-    model.structural_reparam()
+#     model.structural_reparam()
 
-    start = time()
-    pred_series = model(past_series2)
-    end = time()
+#     start = time()
+#     pred_series = model(past_series2)
+#     end = time()
 
-    print(pred_series.shape, f"time {end - start}")
+#     print(pred_series.shape, f"time {end - start}")

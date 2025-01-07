@@ -123,13 +123,13 @@ seed_everything()
 if parser_args.model == 'modernTCN':
     NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
     # from TCNmodelPosAll import ModernTCN_DC
-    from ModernTCN import ModernTCNnew
+    from ModernTCN import ModernTCN_MutiTask
     # 不可结构重参数化：
     # model = ModernTCN_DC(INPUT_CHANNELS, WINDOW_SIZE, TAG_LEN, D=D,
     #                      P=P, S=S, kernel_size=kernel_size, r=R, num_layers=NUM_LAYERS, pos_D=POS_D).to(device)
 
     # 可结构重参数化：
-    model = ModernTCNnew(INPUT_CHANNELS, 
+    model = ModernTCN_MutiTask(INPUT_CHANNELS, 
                         TAG_LEN, 
                         D=D,
                         ffn_ratio=R, 
