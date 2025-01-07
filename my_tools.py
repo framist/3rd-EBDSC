@@ -1,12 +1,13 @@
-import numpy as np
-from tqdm import tqdm
 from typing import Dict, List, Tuple
-import torch
+
 # %matplotlib widget
 import matplotlib.pyplot as plt
-
+import numpy as np
+import torch
 from sklearn.manifold import TSNE
-from sklearn.metrics import precision_score, recall_score, accuracy_score, f1_score
+from sklearn.metrics import (accuracy_score, f1_score, precision_score,
+                             recall_score)
+from tqdm import tqdm
 
 
 def seed_everything(seed: int = 3407):

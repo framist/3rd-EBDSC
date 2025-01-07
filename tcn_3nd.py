@@ -1,23 +1,23 @@
 # %%
 # Modern TCN 推荐参数
-import numpy as np
-from tqdm import tqdm
-from typing import List
-import torch
-from torch import nn, Tensor
-import torch.utils.data as Data
-from torch.cuda.amp import autocast, GradScaler
-
+import datetime
 # %matplotlib widget
 from typing import List
-import datetime
+
+import numpy as np
+import torch
+import torch.utils.data as Data
+from torch import Tensor, nn
+from torch.cuda.amp import GradScaler, autocast
+from tqdm import tqdm
+
 now = datetime.datetime.now().strftime('%m%d_%H-%M')
 
-from ebdsc_3nd import *
+from thop import clever_format, profile
 from torch.utils.data import random_split
-import wandb
 
-from thop import profile, clever_format
+import wandb
+from ebdsc_3nd import *
 
 NAME = 'EBDSC_3nd_AttnHead'
 
@@ -25,6 +25,7 @@ NAME = 'EBDSC_3nd_AttnHead'
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
 
 import argparse
+
 parser = argparse.ArgumentParser(description='Code for 3nd EBDSC -- Wide-Value-Embs TCN -- by framist',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument('--cuda', type=int, default=0, help='所使用的 cuda 设备，暂不支持多设备并行')
@@ -76,6 +77,7 @@ PAD_IDX = 0  # 填充符号 ID
 MAX_CODE_LENGTH = 400  # true max 400
 
 from my_tools import *
+
 seed_everything()
 
 # %% 模型、优化器选择
@@ -83,10 +85,10 @@ if parser_args.model == 'modernTCN':
     NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
     # from TCNmodelPosAll import ModernTCN_DC
     from ModernTCN import ModernTCN_MutiTask
+
     # 不可结构重参数化：
     # model = ModernTCN_DC(INPUT_CHANNELS, WINDOW_SIZE, TAG_LEN, D=D,
     #                      P=P, S=S, kernel_size=kernel_size, r=R, num_layers=NUM_LAYERS, pos_D=POS_D).to(device)
-
     # 可结构重参数化：
     model = ModernTCN_MutiTask(
             M=INPUT_CHANNELS, 
@@ -124,7 +126,7 @@ if parser_args.model == 'modernTCN':
 
 
 elif parser_args.model == 'Transformer':
-    from models.Transformer import Model, Configs
+    from models.Transformer import Configs, Model
     configs = Configs()
     if not IF_LAERNABLE_EMB:
         D = 128 * 5
@@ -158,7 +160,7 @@ elif parser_args.model == 'iTransformer':
     assert IF_LAERNABLE_EMB == True, "iTransformer 模型必须使用可学习的 emb. TODO"
     D = 128 * 2
     NAME = f'iTransformer_{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
-    from models.iTransformer import Model, Configs
+    from models.iTransformer import Configs, Model
     configs = Configs()
     configs.e_layers = NUM_LAYERS
     configs.d_ff = configs.d_model * R
@@ -177,7 +179,7 @@ elif parser_args.model == 'TimesNet':
 
     D = 128
     NAME = f'TimesNet_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
-    from models.TimesNet import Model, Configs
+    from models.TimesNet import Configs, Model
     configs = Configs()
     configs.d_model = D
     configs.e_layers = NUM_LAYERS

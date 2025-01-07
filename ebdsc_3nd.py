@@ -249,7 +249,7 @@ def reverse_sequence_from_logits_batch(
 
     return original_sequences
 
-
+    
 def collate_fn(batch):
     """
     自定义的 collate 函数，用于处理可变长度的 I/Q 数据和 code_sequence。
