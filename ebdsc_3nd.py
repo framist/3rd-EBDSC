@@ -11,7 +11,6 @@ import torch.nn.functional as F
 import numpy as np
 
 
-
 # %%
 # 1. 定义 Dataset 类
 class EBDSC3rdLoader(Dataset):
@@ -219,22 +218,27 @@ def reverse_sequence_from_logits_batch(
     Returns:
         Tensor: [batch_size, orig_len] 原始码序列
     """
-    batch_size, seq_len, num_classes = expanded_logits.shape
-    
+    # * Softmax 转换为概率
+    expanded_probs = F.softmax(expanded_logits, dim=-1)
+    batch_size, seq_len, num_classes = expanded_probs.shape
+
     repeat_counts = symbol_width_absl.int()  # [batch_size]
-    repeat_counts = torch.clip(repeat_counts, min=5, max=20) # 根据数据集
-    
+    repeat_counts = torch.clip(repeat_counts, min=5, max=20)  # 根据数据集
+
     # 计算每个样本的原始序列长度
-    orig_lens = torch.div(seq_len, repeat_counts, rounding_mode='floor')
+    orig_lens = torch.div(seq_len, repeat_counts, rounding_mode="floor")
     max_orig_len = orig_lens.max().item()
-    
+
     # 初始化输出
-    original_sequences = torch.full((batch_size, max_orig_len), pad, device=expanded_logits.device)
+    original_sequences = torch.full((batch_size, max_orig_len), pad, device=expanded_probs.device)
 
     # 对每个样本处理
     for b in range(batch_size):
         # 使用 unfold 切分窗口
-        windows = expanded_logits[b].unfold(0, repeat_counts[b], repeat_counts[b])
+        windows = expanded_probs[b].unfold(
+            0, repeat_counts[b], repeat_counts[b]
+        )  # [num_windows, repeat_count, num_classes]
+
         # 在窗口内求和并取最大值索引
         summed_logits = windows.sum(dim=-1)  # [orig_len, num_classes]
         pred_codes = summed_logits.argmax(dim=-1)  # [orig_len]
@@ -272,7 +276,6 @@ def collate_fn(batch):
     code_seq_aligned_list = torch.nn.utils.rnn.pad_sequence(
         code_seq_aligned_list, batch_first=True, padding_value=0
     )  # [batch_size, max_code_len]
-
 
     # 填充 code_sequence
     code_padded = torch.nn.utils.rnn.pad_sequence(
@@ -326,9 +329,10 @@ def compute_SW_score(symbol_width_pred, symbol_width_labels):
     return SW_score
 
 
-def compute_CQ_score(code_seq_pred, code_seq_labels, pad_idx=0):
+def compute_CQ_score(code_seq_pred: torch.Tensor, code_seq_labels: torch.Tensor, pad_idx: int=0, code_map_offset:int=1):
     """
     计算码序列解调余弦相似度得分 (CQ_score)。
+    NOTE 计算时需减去 code_map_offset
     Args:
         code_seq_pred (Tensor): [batch_size, tgt_seq_len]
         code_seq_labels (Tensor): [batch_size, tgt_seq_len]
@@ -341,7 +345,7 @@ def compute_CQ_score(code_seq_pred, code_seq_labels, pad_idx=0):
     for i in range(batch_size):
         true_seq = code_seq_labels[i].cpu().numpy()
         pred_seq = code_seq_pred[i].cpu().numpy()
-        
+
         # 截断或填充预测序列
         true_length = np.sum(true_seq != pad_idx)
         # pred_length = np.sum(pred_seq != pad_idx)
@@ -352,14 +356,15 @@ def compute_CQ_score(code_seq_pred, code_seq_labels, pad_idx=0):
             pred_seq = np.pad(pred_seq, (0, max_length - len(pred_seq)), "constant", constant_values=pad_idx)
 
         # 计算余弦相似度
-        true_vec = true_seq.astype(float)
-        pred_vec = pred_seq.astype(float)
+        true_vec = true_seq.astype(float) - code_map_offset
+        pred_vec = pred_seq.astype(float) - code_map_offset
         norm_true = np.linalg.norm(true_vec)
         norm_pred = np.linalg.norm(pred_vec)
         if norm_true == 0 or norm_pred == 0:
             CS = 0.0
         else:
             CS = np.dot(true_vec, pred_vec) / (norm_true * norm_pred)
+
         # 转换为 CQ_score
         if CS < 0.7:
             CQ_score = 0.0
@@ -370,6 +375,7 @@ def compute_CQ_score(code_seq_pred, code_seq_labels, pad_idx=0):
         CQ_score = np.clip(CQ_score, 0.0, 100.0)
         scores.append(CQ_score)
     return torch.tensor(scores, device=code_seq_pred.device)
+
 
 
 def confusion_matrix(
@@ -396,3 +402,9 @@ def confusion_matrix(
     if if_save:
         plt.savefig(f"saved_figs/{plot_name}.png")
     plt.show()
+
+
+if __name__ == "__main__":
+    p = torch.tensor([0, 10]).unsqueeze(0) + 1
+    l = torch.tensor([10, 0]).unsqueeze(0) + 1
+    assert compute_CQ_score(p, l, pad_idx=0, code_map_offset=1)[0] == 0.

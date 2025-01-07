@@ -19,7 +19,7 @@ import wandb
 
 from thop import profile, clever_format
 
-NAME = 'EBDSC_3nd'
+NAME = 'EBDSC_3nd_AttnHead'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -73,6 +73,7 @@ IF_LAERNABLE_EMB = True
 NUM_CODE_CLASSES = 33
 NUM_MOD_CLASSES = 11
 PAD_IDX = 0  # 填充符号 ID
+MAX_CODE_LENGTH = 400  # true max 400
 
 from my_tools import *
 seed_everything()
@@ -256,21 +257,19 @@ if parser_args.wandb:
         name=NAME,
         # track hyperparameters and run metadata
         config=parser_args,
-        tags=["attenHead", "MutiTask"],
+        tags=["MutiTask", "MT", "SW", "CQ"],
+        # tags=["MutiTask", "SW", "CQ"],
     )
 
-max_code_length = 400  # true max 400
 
 root_dir = "../train_data/"  # 替换为实际路径
 
 # 创建 train_loader
-full_dataset = EBDSC3rdLoader(root_dir=root_dir, max_code_length=max_code_length)
+full_dataset = EBDSC3rdLoader(root_dir=root_dir, max_code_length=MAX_CODE_LENGTH)
 
 # 8. 训练模型
 
 criterion = MultiTaskLoss(0.2, 0.3, 0.5, pad_idx=PAD_IDX)
-# optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
 # 定义训练集和验证集的比例，例如 80% 训练，20% 验证
 train_size = int(0.8 * len(full_dataset))
@@ -392,6 +391,7 @@ for epoch in t:
 
             code_sed_pred = reverse_sequence_from_logits_batch(
                 symbol_width_absl=symbol_width_pred * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,
+                # symbol_width_absl=symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,  # ! ture labal
                 expanded_logits=code_seq_logits,
                 pad=PAD_IDX,
             )

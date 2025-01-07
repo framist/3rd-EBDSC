@@ -254,10 +254,12 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # w/o pool
         # self.classificationhead = nn.Linear(D * M, num_classes)
         self.sortinghead = nn.Sequential(
-            nn.Linear(D * M, D * M),
+            nn.Linear(D * M, D * M * 2),
+            nn.ReLU(),
+            nn.Linear(D * M * 2, D * M * 2),
             nn.ReLU(),
             nn.Dropout(head_dropout),
-            nn.Linear(D * M, num_code_classes)
+            nn.Linear(D * M * 2, num_code_classes)
         )
         
         # 分类头：调制类型
@@ -272,6 +274,8 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # 回归头：码元宽度
         self.symbol_width_regressor = nn.Sequential(
             AttentionPool(D * M),
+            nn.Linear(D * M, D * M),
+            nn.ReLU(),
             nn.Linear(D * M, D * M),
             nn.ReLU(),
             nn.Dropout(head_dropout),
