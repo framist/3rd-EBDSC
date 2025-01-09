@@ -1,6 +1,7 @@
 # %%
 import itertools
 import os
+
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
@@ -29,7 +30,20 @@ class EBDSC3rdLoader(Dataset):
     # 码元宽度的单位与 IQ 单位差 20 倍
     SYMBOL_WIDTH_UNIT = 20
 
-    def __init__(self, root_dir, code_map_offset=1):
+    # 起始偏置
+    # BPSK: {0, 1}
+    # QPSK: {0, 1, 2, 3}
+    # 8PSK: {0, 1, 2, 3, 4, 5, 6, 7}
+    # MSK: {0, 1}
+    # 8QAM: {0, 1, 2, 3, 4, 5, 6, 7}
+    # 16QAM: {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+    # 32QAM: {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}
+    # 8APSK: {0, 1, 2, 3, 4, 5, 6, 7}
+    # 16APSK: {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+    # 32APSK: {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}
+    START_OFFSET = [0, 2, 6, 14, 16, 24, 40, 72, 80, 96, 128]  # 0 ~ 10(UNKNOWN)
+
+    def __init__(self, root_dir, code_map_offset: int = 1, mod_uniq_symbol: bool = False):
         """
         Args:
             root_dir (str): 数据集根目录。
@@ -41,11 +55,21 @@ class EBDSC3rdLoader(Dataset):
                     - 3 -> <EOS> (终止符号)
         """
         self.samples = []
-        self.code_mapping = code_map_offset
-        self.num_code_classes = 32 + code_map_offset  # 符号类别数
+        self.code_map_offset = code_map_offset
+        self.mod_uniq_symbol = mod_uniq_symbol
+
+        # 符号类别数
+        if mod_uniq_symbol:
+            self.num_code_classes = EBDSC3rdLoader.START_OFFSET[-1] + 1
+        else:
+            self.num_code_classes = 32
+        self.num_code_classes = self.num_code_classes + code_map_offset
+
+        # mod 类别数
+        self.num_mod_classes = 11
 
         for label in range(11):
-            folder_path = os.path.join(root_dir, self.MOD_TYPE[label])
+            folder_path = os.path.join(root_dir, EBDSC3rdLoader.MOD_TYPE[label])
             if os.path.isdir(folder_path):
                 files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".csv")]
                 self.samples.extend(iter(files))
@@ -55,24 +79,29 @@ class EBDSC3rdLoader(Dataset):
 
     def __getitem__(self, idx):
         file_path = self.samples[idx]
-        df = pd.read_csv(file_path, names=self.DATA_COLUMNS, header=None)
+        df = pd.read_csv(file_path, names=EBDSC3rdLoader.DATA_COLUMNS, header=None)
 
-        # 提取 I/Q 数据
+        # - 提取 I/Q 数据
         IQ_data = df[["I", "Q"]].dropna().to_numpy().astype(np.float32)
         IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)  # 标准化
 
-        # 提取 mod_type 和 symbol_width
+        # - 提取 mod_type 和 symbol_width
         # mod_type = int(df["mod_type"].dropna().iloc[0]) if not df["mod_type"].dropna().empty else 11  # 11 表示 UNKNOWN
-        mod_type = df["mod_type"].dropna().iloc[0] - 1  # 从 0 开始
+        mod_type = df["mod_type"].dropna().astype(int).iloc[0] - 1  # 从 0 开始
         symbol_width = df["symbol_width"].dropna().iloc[0]
 
-        # 提取 code_sequence，映射为整数 ID
+        # - 提取 code_sequence
         code_sequence = df["code_sequence"].dropna().astype(int).to_numpy()
-        
-        # 根据 code_mapping 将符号映射为唯一的整数 ID
-        mapped_code_sequence = code_sequence + self.code_mapping
+
+        # 映射为唯一的整数 ID
+        if self.mod_uniq_symbol:
+            code_sequence = unique_symbol(code_sequence, mod_type)
+        # 让位 PAD
+        mapped_code_sequence = code_sequence + self.code_map_offset
+
+        # - 对齐 code_sequence
         code_sequence_aligned = repeat_and_pad_sequence(
-            symbol_width * self.SYMBOL_WIDTH_UNIT, len(IQ_data), mapped_code_sequence, self.PAD
+            symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT, len(IQ_data), mapped_code_sequence, EBDSC3rdLoader.PAD
         )
 
         return {
@@ -83,6 +112,25 @@ class EBDSC3rdLoader(Dataset):
             "IQ_length": torch.tensor(len(IQ_data), dtype=torch.long),  # scalar
             "code_sequence": torch.tensor(mapped_code_sequence, dtype=torch.long),  # [code_len]
         }
+
+
+def unique_symbol(code_sequence: np.ndarray, mod_type: int):
+    """
+    码元符号根据 mod_type 唯一化
+    modtpye: 0 ~ 10
+    """
+    start = EBDSC3rdLoader.START_OFFSET[mod_type]
+    return code_sequence + start
+
+
+def un_unique_symbol(code_sequence: np.ndarray, mod_type: int):
+    """
+    码元符号根据 mod_type 反唯一化
+    modtpye: 0 ~ 10
+    """
+    o = EBDSC3rdLoader.START_OFFSET
+    start = o[mod_type]
+    return code_sequence - start
 
 
 def repeat_and_pad_sequence(symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0):
@@ -248,7 +296,7 @@ def reverse_sequence_from_logits_batch(
 
     return original_sequences
 
-    
+
 def collate_fn(batch):
     """
     自定义的 collate 函数，用于处理可变长度的 I/Q 数据和 code_sequence。
@@ -305,7 +353,7 @@ def compute_MT_score(mod_logits, mod_labels):
     Returns:
         Tensor: [batch_size] 每个样本的 MT_score
     """
-    preds = torch.argmax(mod_logits, dim=1)
+    preds = torch.argmax(mod_logits, dim=-1)
     correct = (preds == mod_labels).float()
     return correct * 100  # 100 或 0
 
@@ -329,10 +377,17 @@ def compute_SW_score(symbol_width_pred, symbol_width_labels):
     return SW_score
 
 
-def compute_CQ_score(code_seq_pred: torch.Tensor, code_seq_labels: torch.Tensor, pad_idx: int=0, code_map_offset:int=1):
+def compute_CQ_score(
+    code_seq_pred: torch.Tensor,
+    code_seq_labels: torch.Tensor,
+    pad_idx: int = 0,
+    code_map_offset: int = 1,
+    mod_uniq_symbol: tuple = (False, None, None),
+):
     """
     计算码序列解调余弦相似度得分 (CQ_score)。
     NOTE 计算时需减去 code_map_offset
+    TODO 提高计算效率
     Args:
         code_seq_pred (Tensor): [batch_size, tgt_seq_len]
         code_seq_labels (Tensor): [batch_size, tgt_seq_len]
@@ -341,6 +396,10 @@ def compute_CQ_score(code_seq_pred: torch.Tensor, code_seq_labels: torch.Tensor,
         Tensor: [batch_size] 每个样本的 CQ_score
     """
     batch_size, tgt_seq_len = code_seq_labels.size()
+    if mod_uniq_symbol[0]:
+        mod_pred = torch.argmax(mod_uniq_symbol[1], dim=-1)
+
+    
     scores = []
     for i in range(batch_size):
         true_seq = code_seq_labels[i].cpu().numpy()
@@ -358,6 +417,11 @@ def compute_CQ_score(code_seq_pred: torch.Tensor, code_seq_labels: torch.Tensor,
         # 计算余弦相似度
         true_vec = true_seq.astype(float) - code_map_offset
         pred_vec = pred_seq.astype(float) - code_map_offset
+        if mod_uniq_symbol[0]:
+            # TODO
+            pred_vec = un_unique_symbol(pred_vec, mod_pred[i])
+            true_vec = un_unique_symbol(true_vec, mod_uniq_symbol[2][i])
+
         norm_true = np.linalg.norm(true_vec)
         norm_pred = np.linalg.norm(pred_vec)
         if norm_true == 0 or norm_pred == 0:
@@ -375,7 +439,6 @@ def compute_CQ_score(code_seq_pred: torch.Tensor, code_seq_labels: torch.Tensor,
         CQ_score = np.clip(CQ_score, 0.0, 100.0)
         scores.append(CQ_score)
     return torch.tensor(scores, device=code_seq_pred.device)
-
 
 
 def confusion_matrix(
@@ -407,4 +470,4 @@ def confusion_matrix(
 if __name__ == "__main__":
     p = torch.tensor([0, 10]).unsqueeze(0) + 1
     l = torch.tensor([10, 0]).unsqueeze(0) + 1
-    assert compute_CQ_score(p, l, pad_idx=0, code_map_offset=1)[0] == 0.
+    assert compute_CQ_score(p, l, pad_idx=0, code_map_offset=1)[0] == 0.0

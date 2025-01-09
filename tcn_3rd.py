@@ -39,10 +39,10 @@ parser.add_argument('--ratio', type=int, default=2, help='ffn ratio')
 parser.add_argument('--ls', type=int, default=51, help='large kernel sizes')
 parser.add_argument('--ss', type=int, default=5, help='small kernel size')
 parser.add_argument('--dp', type=float, default=0.5, help='drop out')
-parser.add_argument('--max_epoch', type=int, default=50, help='max train epoch')
+parser.add_argument('--max_epoch', type=int, default=64, help='max train epoch')
 
 parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
-parser.add_argument('--step_size', type=int, default=10, help='lr step size')
+parser.add_argument('--lr_step_size', type=int, default=64, help='lr step size')
 
 # 对照、消融实验的一些参数
 parser.add_argument('--model', type=str, default='modernTCN', help='backbone 模型选择')
@@ -57,6 +57,7 @@ parser.add_argument('--tags', nargs='+', default=['default'], help='wandb 标签
 parser.add_argument('--true_sym_width', action='store_true', default=False, help='是否使用真实的符号宽度')
 parser.add_argument('--max_code_len', type=int, default=400, help='最大码元长度')
 parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0.3, 0.5], help='多任务损失权重 for MT, SW, CQ')
+parser.add_argument('--mod_uniq_sym', action='store_true', default=False, help='是否使用 mod 独立的符号')
 
 parser_args = parser.parse_args()
 
@@ -82,10 +83,16 @@ MAX_TRAIN_EPOCH = parser_args.max_epoch
 
 IF_LAERNABLE_EMB = True
 
-NUM_CODE_CLASSES = 32 + 1
-NUM_MOD_CLASSES = 11
-PAD_IDX = 0  # 填充符号 ID
+
+root_dir = "../train_data/"  # 替换为实际路径
 CODE_MAP_OFFSET = 1  # 码元映射偏移
+
+# 创建 train_loader
+full_dataset = EBDSC3rdLoader(root_dir=root_dir, code_map_offset=CODE_MAP_OFFSET, mod_uniq_symbol=parser_args.mod_uniq_sym)
+
+NUM_CODE_CLASSES = full_dataset.num_code_classes
+NUM_MOD_CLASSES = full_dataset.num_mod_classes
+PAD_IDX = 0  # 填充符号 ID
 MAX_CODE_LENGTH = parser_args.max_code_len
 MUTITASK_WEIGHTS = parser_args.mutitask_weights
 
@@ -118,7 +125,7 @@ if parser_args.model == 'modernTCN':
     # * CNN 使用的优化器
 
     learn_rate = parser_args.lr
-    lr_step_size = parser_args.step_size
+    lr_step_size = parser_args.lr_step_size
     # learn_rate = 4e-3
     # learn_rate = 2e-4
     # MIN_LR = 1e-4
@@ -274,18 +281,12 @@ if parser_args.wandb:
     )
 
 
-root_dir = "../train_data/"  # 替换为实际路径
-
-# 创建 train_loader
-full_dataset = EBDSC3rdLoader(root_dir=root_dir, code_map_offset=CODE_MAP_OFFSET)
-
-
 if 0. in MUTITASK_WEIGHTS:
     print(f'Warning: 0 in {MUTITASK_WEIGHTS=}')
 criterion = MultiTaskLoss(*MUTITASK_WEIGHTS, pad_idx=PAD_IDX)
 
 # 定义训练集和验证集的比例，例如 80% 训练，20% 验证
-train_size = int(0.8 * len(full_dataset))
+train_size = int(0.9 * len(full_dataset))
 val_size = len(full_dataset) - train_size
 
 # 随机划分数据集
@@ -411,19 +412,26 @@ for epoch in t:
                     pad=PAD_IDX,
                 )
             else:
-                code_sed_pred = code_sequence
-                
+                # 不评分
+                code_sed_pred = torch.zeros_like(code_sequence)
+
             # 计算指标
             MT_scores = compute_MT_score(mod_logits, mod_type)
             SW_scores = compute_SW_score(symbol_width_pred, symbol_width)
-            CQ_scores = compute_CQ_score(code_sed_pred, code_sequence, pad_idx=PAD_IDX)
+            CQ_scores = compute_CQ_score(
+                code_sed_pred,
+                code_sequence,
+                pad_idx=PAD_IDX,
+                code_map_offset=full_dataset.code_map_offset,
+                mod_uniq_symbol=(full_dataset.mod_uniq_symbol, mod_logits, mod_type),
+            )
 
             all_MT_scores.append(MT_scores)
             all_SW_scores.append(SW_scores)
             all_CQ_scores.append(CQ_scores)
             all_mod_labels.append(mod_type)
             all_mod_preds.append(mod_logits.argmax(dim=-1))
-            
+
     avg_val_loss = total_val_loss / len(val_loader)
 
     # 聚合指标
@@ -459,7 +467,7 @@ for epoch in t:
         log["SW"] = all_SW_scores.mean().item()
     if MUTITASK_WEIGHTS[2] > 0.0:
         log["CQ"] = all_CQ_scores.mean().item()
-    
+
     if epoch % 10 == 0:
         # 绘制 类别识别 混淆矩阵
         cm = np.zeros((NUM_MOD_CLASSES, NUM_MOD_CLASSES))
@@ -469,17 +477,16 @@ for epoch in t:
         ax.matshow(cm, cmap="viridis")
         for (i, j), val in np.ndenumerate(cm):
             ax.text(j, i, f"{val:.0f}", ha="center", va="center")
-        
-        plt.title("Modulation Type Confusion Matrix")
+
+        plt.title(f"Modulation Type Confusion Matrix at E{epoch}")
         plt.xlabel("Prediction")
         plt.ylabel("Target")
-        
+
         plt.savefig(f"./saved_figs/{NAME}_confusion_matrix.png")
-        
+
         log["类别识别混淆矩阵"] = fig
-    
+
     wandb.log(log, step=epoch)
-    
-    
+
 
 wandb.finish()
