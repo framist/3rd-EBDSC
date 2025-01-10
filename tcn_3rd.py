@@ -20,7 +20,7 @@ from my_tools import *
 seed_everything()
 
 import wandb
-from ebdsc_3nd import *
+from ebdsc3rd_datatools import *
 
 NAME = '3nd_AttnHead'
 
