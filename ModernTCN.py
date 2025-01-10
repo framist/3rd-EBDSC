@@ -311,11 +311,9 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # cls1 = torch.max(x_emb, dim=1)[0]    # [B, M, D, N] -> [B, D, N]
 
         # 转换为 [64, 1024, 64]
-        encoder_output = cls1.permute(0, 2, 1)  # [64, 64, 1024] -> [64, 1024, 64]
+        encoder_output = cls1.permute(0, 2, 1)
 
-        # 输出为 [64, 1024,12]
-        # [64, 1024, 1, 64] -> [64, 1024, 1, 12]
-        code_seq_logits = self.sortinghead(encoder_output)
+        code_seq_logits = self.sortinghead(encoder_output) # [batch_size, seq_len, 1, num_classes]
 
         # 全局特征用于分类和回归
         # TODO mean 池化待验证

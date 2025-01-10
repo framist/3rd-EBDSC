@@ -59,6 +59,8 @@ parser.add_argument('--max_code_len', type=int, default=400, help='最大码元�
 parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0.3, 0.5], help='多任务损失权重 for MT, SW, CQ')
 parser.add_argument('--mod_uniq_sym', action='store_true', default=False, help='是否使用 mod 独立的符号')
 
+parser.add_argument('--best_continue', action='store_true', default=False, help='是否继续训练')
+
 parser_args = parser.parse_args()
 
 use_cuda = True
@@ -89,6 +91,8 @@ CODE_MAP_OFFSET = 1  # 码元映射偏移
 
 # 创建 train_loader
 full_dataset = EBDSC3rdLoader(root_dir=root_dir, code_map_offset=CODE_MAP_OFFSET, mod_uniq_symbol=parser_args.mod_uniq_sym)
+if parser_args.mod_uniq_sym:
+    NAME += '_mod_uniq_sym'
 
 NUM_CODE_CLASSES = full_dataset.num_code_classes
 NUM_MOD_CLASSES = full_dataset.num_mod_classes
@@ -260,6 +264,9 @@ class MultiTaskLoss(nn.Module):
         batch_size, tgt_seq_len, num_classes = code_seq_logits.size()
         
         # 仅计算非填充部分
+        code_seq_labels = code_seq_labels.reshape(-1)
+        code_seq_logits = code_seq_logits.reshape(-1, num_classes)
+        
         active_logits = code_seq_logits[code_seq_labels != self.pad_idx]
         active_labels = code_seq_labels[code_seq_labels != self.pad_idx]
 
@@ -319,6 +326,7 @@ print(f"{NAME=}")
 print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 print(f"{model=}")
 
+
 # 5. 验证 DataLoader
 # 打印一个批次的数据形状
 for batch in val_loader:
@@ -328,6 +336,9 @@ for batch in val_loader:
     flops, params = clever_format([flops, params], "%.3f")
     print(f"FLOPs: {flops}, Params: {params}")
     break
+
+if parser_args.best_continue:
+    model.load_state_dict(torch.load(f"./saved_models/{NAME}_best.pth", map_location=device))    
 
 scaler = GradScaler()
 torch.cuda.empty_cache()
@@ -382,6 +393,7 @@ for epoch in t:
     all_CQ_scores = []
     all_mod_labels = []
     all_mod_preds = []
+    all_acc = []
     with torch.no_grad():
         for batch in val_loader:
             IQ_data = batch["IQ_data"].to(device)
@@ -425,35 +437,38 @@ for epoch in t:
                 code_map_offset=full_dataset.code_map_offset,
                 mod_uniq_symbol=(full_dataset.mod_uniq_symbol, mod_logits, mod_type),
             )
+            acc = compute_sequence_accuracy(code_sed_pred, code_sequence, pad_idx=PAD_IDX)
 
             all_MT_scores.append(MT_scores)
             all_SW_scores.append(SW_scores)
             all_CQ_scores.append(CQ_scores)
             all_mod_labels.append(mod_type)
             all_mod_preds.append(mod_logits.argmax(dim=-1))
+            all_acc.append(acc)
 
     avg_val_loss = total_val_loss / len(val_loader)
 
     # 聚合指标
-    all_MT_scores = torch.cat(all_MT_scores)  # [num_val_samples]
-    all_SW_scores = torch.cat(all_SW_scores)  # [num_val_samples]
-    all_CQ_scores = torch.cat(all_CQ_scores)  # [num_val_samples]
+    avg_MT_scores = torch.cat(all_MT_scores).mean().item()
+    avg_SW_scores = torch.cat(all_SW_scores).mean().item()
+    avg_CQ_scores = torch.cat(all_CQ_scores).mean().item()
     all_mod_labels = torch.cat(all_mod_labels)  # [num_val_samples]
     all_mod_preds = torch.cat(all_mod_preds)  # [num_val_samples]
+    avg_acc = torch.cat(all_acc).mean().item()
 
     # 计算加权总分
-    sample_scores = 0.2 * all_MT_scores + 0.3 * all_SW_scores + 0.5 * all_CQ_scores
-    avg_sample_score = sample_scores.mean().item()
+    avg_sample_score = 0.2 * avg_MT_scores + 0.3 * avg_SW_scores + 0.5 * avg_CQ_scores
 
     tqdm.write(
         f"Epoch [{epoch+1}/{MAX_TRAIN_EPOCH}], Train Loss: {avg_train_loss:.4f}, "
         f"Val Loss: {avg_val_loss:.4f}, Val Score: {avg_sample_score:.2f}, "
-        f"MT: {all_MT_scores.mean().item():.2f}, SW: {all_SW_scores.mean().item():.2f}, CQ: {all_CQ_scores.mean().item():.2f}"
+        f"MT: {avg_MT_scores:.2f}, SW: {avg_SW_scores:.2f}, CQ: {avg_CQ_scores:.2f}, acc: {avg_acc:.2f}"
     )
 
     if avg_sample_score > best_score:
         best_score = avg_sample_score
         torch.save(model.state_dict(), f"./saved_models/{NAME}_best.pth")
+        print(f"Saved {NAME}_best.pth with best score {best_score:.2f}")
 
     log = {
         "Train Loss": avg_train_loss,
@@ -462,11 +477,12 @@ for epoch in t:
     }
 
     if MUTITASK_WEIGHTS[0] > 0.0:
-        log["MT"] = all_MT_scores.mean().item()
+        log["MT"] = avg_MT_scores
     if MUTITASK_WEIGHTS[1] > 0.0:
-        log["SW"] = all_SW_scores.mean().item()
+        log["SW"] = avg_SW_scores
     if MUTITASK_WEIGHTS[2] > 0.0:
-        log["CQ"] = all_CQ_scores.mean().item()
+        log["CQ"] = avg_CQ_scores
+        log["acc"] = avg_acc
 
     if epoch % 10 == 0:
         # 绘制 类别识别 混淆矩阵
@@ -486,7 +502,8 @@ for epoch in t:
 
         log["类别识别混淆矩阵"] = fig
 
-    wandb.log(log, step=epoch)
+    if parser_args.wandb:
+        wandb.log(log, step=epoch)
 
 
 wandb.finish()

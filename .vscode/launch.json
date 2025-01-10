@@ -1,0 +1,31 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问：https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Python 调试程序：包含参数的当前文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": [
+                // --num_layers 32 --ratio 4 --batch_size 16 --lr 0.00005 --lr_step_size 100 --max_epoch 100 --cuda 3 --wandb --name XL32l4r_c --tags all XXL --best_continue
+                "--num_layers", "1",
+                "--ratio", "1",
+                "--batch_size", "2",
+                "--lr", "0.00005",
+                "--lr_step_size", "100",
+                "--max_epoch", "100",
+                // "--cuda", "3",
+                // "--wandb",
+                // "--name", "XL32l4r_c",
+                // "--tags", "all", "XXL",
+                // "--best_continue"
+                "--mod_uniq_sym"
+            ]
+        }
+    ]
+}

@@ -93,11 +93,11 @@ class EBDSC3rdLoader(Dataset):
         # - 提取 code_sequence
         code_sequence = df["code_sequence"].dropna().astype(int).to_numpy()
 
-        # 映射为唯一的整数 ID
-        if self.mod_uniq_symbol:
-            code_sequence = unique_symbol(code_sequence, mod_type)
         # 让位 PAD
         mapped_code_sequence = code_sequence + self.code_map_offset
+        # 映射为唯一的整数 ID
+        if self.mod_uniq_symbol:
+            mapped_code_sequence = unique_symbol(mapped_code_sequence, mod_type)
 
         # - 对齐 code_sequence
         code_sequence_aligned = repeat_and_pad_sequence(
@@ -123,13 +123,12 @@ def unique_symbol(code_sequence: np.ndarray, mod_type: int):
     return code_sequence + start
 
 
-def un_unique_symbol(code_sequence: np.ndarray, mod_type: int):
+def un_unique_symbol(code_sequence, mod_type):
     """
     码元符号根据 mod_type 反唯一化
     modtpye: 0 ~ 10
     """
-    o = EBDSC3rdLoader.START_OFFSET
-    start = o[mod_type]
+    start = EBDSC3rdLoader.START_OFFSET[mod_type]
     return code_sequence - start
 
 
@@ -254,7 +253,7 @@ def reverse_sequence_from_logits(symbol_width_absl: float, expanded_logits: np.n
 
 def reverse_sequence_from_logits_batch(
     symbol_width_absl: torch.Tensor, expanded_logits: torch.Tensor, pad: int = 0
-) -> torch.Tensor:
+) -> torch.LongTensor:
     """从展开的 logits 序列恢复原始码序列，支持批处理
 
     Args:
@@ -277,7 +276,7 @@ def reverse_sequence_from_logits_batch(
     max_orig_len = orig_lens.max().item()
 
     # 初始化输出
-    original_sequences = torch.full((batch_size, max_orig_len), pad, device=expanded_probs.device)
+    original_sequences = torch.full((batch_size, max_orig_len), pad, device=expanded_probs.device, dtype=torch.long)
 
     # 对每个样本处理
     for b in range(batch_size):
@@ -377,9 +376,9 @@ def compute_SW_score(symbol_width_pred, symbol_width_labels):
     return SW_score
 
 
-def compute_CQ_score(
-    code_seq_pred: torch.Tensor,
-    code_seq_labels: torch.Tensor,
+def _compute_CQ_score(
+    code_seq_preds: torch.LongTensor,
+    code_seq_labels: torch.LongTensor,
     pad_idx: int = 0,
     code_map_offset: int = 1,
     mod_uniq_symbol: tuple = (False, None, None),
@@ -389,7 +388,7 @@ def compute_CQ_score(
     NOTE 计算时需减去 code_map_offset
     TODO 提高计算效率
     Args:
-        code_seq_pred (Tensor): [batch_size, tgt_seq_len]
+        code_seq_preds (Tensor): [batch_size, tgt_seq_len]
         code_seq_labels (Tensor): [batch_size, tgt_seq_len]
         pad_idx (int): 填充符号的索引
     Returns:
@@ -399,20 +398,21 @@ def compute_CQ_score(
     if mod_uniq_symbol[0]:
         mod_pred = torch.argmax(mod_uniq_symbol[1], dim=-1)
 
-    
     scores = []
-    for i in range(batch_size):
-        true_seq = code_seq_labels[i].cpu().numpy()
-        pred_seq = code_seq_pred[i].cpu().numpy()
+    true_seqs = code_seq_labels.cpu().numpy()
+    pred_seqs = code_seq_preds.cpu().numpy()
 
-        # 截断或填充预测序列
-        true_length = np.sum(true_seq != pad_idx)
-        # pred_length = np.sum(pred_seq != pad_idx)
-        max_length = true_length
-        pred_seq = pred_seq[:max_length]
-        true_seq = true_seq[:max_length]
-        if len(pred_seq) < max_length:
-            pred_seq = np.pad(pred_seq, (0, max_length - len(pred_seq)), "constant", constant_values=pad_idx)
+    for i in range(batch_size):
+
+        # 截断或填充预测序列 true_seqs[i] 第一个 0
+        true_length = np.sum(true_seqs[i] != pad_idx)
+
+        pred_seq = pred_seqs[i, :true_length]
+        true_seq = true_seqs[i, :true_length]
+        if len(pred_seq) < true_length:
+            pred_seq = np.pad(
+                pred_seq, (0, true_length - len(pred_seq)), "constant", constant_values=code_map_offset
+            )  # NOTE 使用 code_map_offset 填充
 
         # 计算余弦相似度
         true_vec = true_seq.astype(float) - code_map_offset
@@ -438,36 +438,259 @@ def compute_CQ_score(
             CQ_score = ((CS - 0.7) / (0.95 - 0.7)) * 100
         CQ_score = np.clip(CQ_score, 0.0, 100.0)
         scores.append(CQ_score)
-    return torch.tensor(scores, device=code_seq_pred.device)
+    return torch.tensor(scores, device=code_seq_preds.device)
 
 
-def confusion_matrix(
-    predictions, targets, plot_name: str = None, tag_len: int = 12, average: str = "weighted", if_save=False
-):
+def compute_CQ_score(
+    code_seq_preds: torch.Tensor,
+    code_seq_labels: torch.Tensor,
+    pad_idx: int = 0,
+    code_map_offset: int = 1,
+    mod_uniq_symbol: tuple = (False, None, None),
+) -> torch.Tensor:
     """
-    混淆矩阵
+    计算码序列解调余弦相似度得分 (CQ_score)。
+    NOTE 计算时需减去 code_map_offset
+    Args:
+        code_seq_preds (Tensor): [batch_size, tgt_seq_len] 预测的码序列
+        code_seq_labels (Tensor): [batch_size, tgt_seq_len] 真实的码序列
+        pad_idx (int): 填充符号的索引
+        code_map_offset (int): 码映射偏移量
+    Returns:
+        Tensor: [batch_size] 每个样本的 CQ_score
     """
-    confusion_matrix = np.zeros((tag_len, tag_len))
+    device = code_seq_preds.device
+    batch_size_pred, pred_seq_len = code_seq_preds.size()
+    batch_size, tgt_seq_len = code_seq_labels.size()
 
-    for target, prediction in zip(targets, predictions):
-        confusion_matrix[target, prediction] += 1
+    # TODO
+    if mod_uniq_symbol[0]:
+        offset = torch.tensor(EBDSC3rdLoader.START_OFFSET, device=device, dtype=torch.long)
+        
+        mod_preds = torch.argmax(mod_uniq_symbol[1], dim=-1)
+        code_seq_preds = torch.where(code_seq_preds != 0, code_seq_preds - offset[mod_preds].unsqueeze(1), code_seq_preds)
+        code_seq_preds = code_seq_preds.clamp(min=0+code_map_offset)    # TODO
+        
+        mod_labels = mod_uniq_symbol[2]        
+        code_seq_labels = torch.where(code_seq_labels != 0, code_seq_labels - offset[mod_labels].unsqueeze(1), code_seq_labels)
+        # TODO
+        assert torch.sum(code_seq_labels < 0) == 0
+        assert torch.sum(code_seq_labels > 32) == 0
 
-    plt.figure()
-    plt.imshow(confusion_matrix / np.maximum(1, np.sum(confusion_matrix, axis=1)[:, None]))
-    # 同时在方格内显示数值
-    for i, j in itertools.product(range(tag_len), range(tag_len)):
-        plt.text(j, i, f"{confusion_matrix[i, j]:.0f}", ha="center", va="center", color="blue")
-    plt.title("confusion matrix")
-    plt.xlabel("prediction")
-    plt.ylabel("target")
-    plt.colorbar()
-    plt.title(f"{plot_name}")
-    if if_save:
-        plt.savefig(f"saved_figs/{plot_name}.png")
-    plt.show()
+    
+    
+    # 计算每个样本的真实长度（非 pad 的长度）
+    true_lengths = (code_seq_labels != pad_idx).sum(dim=1)  # [batch_size]
 
+    # 确定每个样本的最大真实长度，以便截断预测序列
+    max_true_length = true_lengths.max().item()
 
+    # 如果预测序列长度超过最大真实长度，进行截断；否则，进行填充
+    if pred_seq_len > max_true_length:
+        # 截断预测序列
+        pred_seq_truncated = code_seq_preds[:, :max_true_length]
+    else:
+        # 填充预测序列，使其长度与最大真实长度一致
+        padding_size = max_true_length - pred_seq_len
+
+        padding = torch.full(
+            (batch_size_pred, padding_size), code_map_offset, dtype=code_seq_preds.dtype, device=device
+        )
+        pred_seq_truncated = torch.cat([code_seq_preds, padding], dim=1)
+
+    # 创建掩码，表示每个位置是否在真实长度内
+    mask = torch.arange(max_true_length, device=device).unsqueeze(0).expand(
+        batch_size, max_true_length
+    ) < true_lengths.unsqueeze(
+        1
+    )  # [batch_size, max_true_length]
+
+    # 将序列转换为向量，并减去 code_map_offset
+    true_vec = (
+        code_seq_labels[:, :max_true_length] - code_map_offset
+    ).float() * mask.float()  # [batch_size, max_true_length]
+    pred_vec = (pred_seq_truncated - code_map_offset).float() * mask.float()  # [batch_size, max_true_length]
+
+    # 计算余弦相似度
+    dot_product = (true_vec * pred_vec).sum(dim=1)  # [batch_size]
+    norm_true = true_vec.norm(p=2, dim=1)  # [batch_size]
+    norm_pred = pred_vec.norm(p=2, dim=1)  # [batch_size]
+
+    # 处理范数为零的情况，避免除以零
+    cosine_similarity = torch.where(
+        (norm_true == 0) | (norm_pred == 0), torch.tensor(0.0, device=device), dot_product / (norm_true * norm_pred)
+    )
+
+    # print(f"{cosine_similarity=}")
+    # 转换为 CQ_score
+    CQ_score = torch.zeros_like(cosine_similarity)
+    # CS > 0.95
+    mask_high = cosine_similarity > 0.95
+    CQ_score[mask_high] = 100.0
+    # 0.7 <= CS <= 0.95
+    mask_mid = (cosine_similarity >= 0.7) & (cosine_similarity <= 0.95)
+    CQ_score[mask_mid] = ((cosine_similarity[mask_mid] - 0.7) / (0.95 - 0.7)) * 100
+    # CS < 0.7 保持为 0
+
+    # 确保分数在 [0, 100] 范围内
+    CQ_score = CQ_score.clamp(0.0, 100.0)
+    
+
+    return CQ_score
+
+import torch
+
+def compute_sequence_accuracy(
+    code_seq_preds: torch.Tensor,
+    code_seq_labels: torch.Tensor,
+    pad_idx: int = 0,
+    code_map_offset: int = 1
+) -> torch.Tensor:
+    """
+    计算序列准确率（Sequence Accuracy）。
+
+    序列准确率衡量预测序列与真实序列在所有非填充位置上匹配的比例。
+
+    Args:
+        code_seq_preds (Tensor): [batch_size, pred_seq_len] 预测的码序列。
+        code_seq_labels (Tensor): [batch_size, label_seq_len] 真实的码序列。
+        pad_idx (int, optional): 填充符号的索引。默认为 0。
+        code_map_offset (int, optional): 码映射偏移量。默认为 1。
+
+    Returns:
+        Tensor: [batch_size] 每个样本的序列准确率，值介于 0.0 和 1.0 之间。
+    """
+    device = code_seq_preds.device
+    batch_size_pred, pred_seq_len = code_seq_preds.size()
+    batch_size_label, label_seq_len = code_seq_labels.size()
+
+    if batch_size_pred != batch_size_label:
+        raise ValueError("code_seq_preds 和 code_seq_labels 的 batch_size 必须相同")
+
+    # 计算每个样本的真实长度（非 pad 的长度）
+    true_lengths = (code_seq_labels != pad_idx).sum(dim=1)  # [batch_size]
+
+    # 确定每个样本的最大真实长度
+    max_true_length = true_lengths.max().item()
+
+    # 截断或填充预测序列至最大真实长度
+    if pred_seq_len > max_true_length:
+        # 截断预测序列
+        pred_seq_truncated = code_seq_preds[:, :max_true_length]
+    else:
+        # 填充预测序列，使其长度与最大真实长度一致
+        padding_size = max_true_length - pred_seq_len
+        if padding_size > 0:
+            padding = torch.full(
+                (batch_size_pred, padding_size),
+                pad_idx,
+                dtype=code_seq_preds.dtype,
+                device=device
+            )
+            pred_seq_truncated = torch.cat([code_seq_preds, padding], dim=1)
+        else:
+            pred_seq_truncated = code_seq_preds
+
+    # 截断真实序列至最大真实长度
+    true_seq_truncated = code_seq_labels[:, :max_true_length]
+
+    # 创建一个掩码，表示每个位置是否在真实长度内
+    # [batch_size, max_true_length]
+    mask = torch.arange(max_true_length, device=device).unsqueeze(0).expand(batch_size_label, max_true_length) < true_lengths.unsqueeze(1)
+
+    # 填充预测序列：使用 code_map_offset 填充预测序列的无效位置
+    # 这样在减去 code_map_offset 后，填充位置的值为 0
+    pred_seq_padded = torch.where(
+        mask,
+        pred_seq_truncated,
+        torch.full_like(pred_seq_truncated, code_map_offset)
+    )
+
+    # 将序列转换为向量，并减去 code_map_offset
+    # 有效位置的值为 (value - code_map_offset)
+    # 填充位置的值为 (code_map_offset - code_map_offset) = 0
+    true_vec = (true_seq_truncated - code_map_offset).float() * mask.float()  # [batch_size, max_true_length]
+    pred_vec = (pred_seq_padded - code_map_offset).float() * mask.float()    # [batch_size, max_true_length]
+
+    # 比较预测序列与真实序列是否匹配
+    # 仅考虑掩码为 True 的位置
+    correct = (true_vec == pred_vec) & mask  # [batch_size, max_true_length]
+
+    # 计算每个样本的正确预测数
+    correct_counts = correct.sum(dim=1).float()  # [batch_size]
+
+    # 计算每个样本的准确率
+    # 避免除以零：将 true_lengths 中为 0 的样本设定为 1.0（定义为空序列为完全正确）
+    per_sample_accuracy = correct_counts / true_lengths.clamp(min=1).float()  # [batch_size]
+
+    # 对于 true_length 为 0 的样本，设定准确率为 1.0
+    per_sample_accuracy = torch.where(
+        true_lengths > 0,
+        per_sample_accuracy,
+        torch.ones_like(per_sample_accuracy)
+    )
+
+    return per_sample_accuracy
+
+# 示例用法
 if __name__ == "__main__":
-    p = torch.tensor([0, 10]).unsqueeze(0) + 1
-    l = torch.tensor([10, 0]).unsqueeze(0) + 1
-    assert compute_CQ_score(p, l, pad_idx=0, code_map_offset=1)[0] == 0.0
+    # 示例数据
+    code_seq_preds = torch.tensor([
+        [2, 3, 4, 5, 6, 7],   # 预测序列长度 6
+        [1, 2, 3, 4, 0, 0],   # 预测序列长度 4
+        [3, 3, 3, 3, 3, 3],   # 预测序列长度 6
+        [0, 0, 0, 0, 0, 0]    # 预测序列全是 pad
+    ])
+    
+    code_seq_labels = torch.tensor([
+        [2, 3, 4, 5, 0, 0],   # 真实序列长度 4
+        [1, 2, 3, 4, 5, 0],   # 真实序列长度 5
+        [3, 3, 3, 3, 3, 3],   # 真实序列长度 6
+        [0, 0, 0, 0, 0, 0]    # 真实序列全是 pad
+    ])
+    
+    pad_idx = 0
+    code_map_offset = 1
+    
+    # 计算序列准确率
+    per_sample_accuracy = compute_sequence_accuracy(code_seq_preds, code_seq_labels, pad_idx, code_map_offset)
+    
+    print("Per-sample Accuracy:", per_sample_accuracy)
+
+    
+    # for i in range(1, 32):
+    #     l = torch.ones((2, 32)) + 5
+    #     p = torch.randint(0, i, l.size())
+    #     # assert compute_CQ_score(p, l, pad_idx=0, code_map_offset=1)[0] == 0.0
+    #     s = compute_CQ_score(p, l, pad_idx=0, code_map_offset=1)
+    #     print(f"{i}: {s.mean().item()}")
+
+    # 示例数据
+    code_seq_preds = torch.tensor(
+        [
+            [2, 3, 1, 0, 0],
+            [1, 2, 3, 4, 0],
+            [3, 3, 3, 3, 3],
+            [3, 2, 4, 5, 2],
+            [1, 1, 2, 1, 2],
+            [1, 1, 2, 1, 2],
+        ]
+    )
+
+    code_seq_labels = torch.tensor(
+        [
+            [2, 3, 1, 1, 0],
+            [1, 2, 3, 0, 0],
+            [3, 3, 3, 3, 3],
+            [3, 3, 3, 3, 3],
+            [1, 1, 1, 1, 2],
+            [11, 11, 12, 11, 12],
+        ]
+    )
+
+    pad_idx = 0
+    code_map_offset = 1
+
+    # 计算 CQ_score
+    cq_scores = compute_CQ_score(code_seq_preds, code_seq_labels, pad_idx, code_map_offset)
+    print(cq_scores)
