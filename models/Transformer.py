@@ -9,12 +9,12 @@ from einops import rearrange
 
 class Configs():
     def __init__(self):
-        self.task_name = "token_classification"
+        self.task_name = "muti_tasks"
         self.pred_len = None
         # self.seq_len = 1024
         self.output_attention = False
-        self.enc_in = 5
-        self.d_model = 128 * 5
+        self.enc_in = 2
+        self.d_model = 128 * 2
         self.embed = 'fixed' # 不用
         self.freq = 'h' # 不用
         # self.use_norm = False
@@ -23,8 +23,26 @@ class Configs():
         self.e_layers = 8
         self.d_ff = self.d_model
         self.activation = 'relu'
-        self.num_class = 12
         
+        self.head_dropout = 0.5
+        self.num_code_classes = None
+        self.num_mod_classes = None
+        
+        
+# Attention Pooling
+class AttentionPool(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.attention = nn.Linear(d_model, 1)
+        
+    def forward(self, x):
+        # x: [batch_size, seq_len, d_model]
+        scores = self.attention(x)  # [batch_size, seq_len, 1]
+        weights = F.softmax(scores, dim=1)  # [batch_size, seq_len, 1] 
+        global_feat = torch.sum(x * weights, dim=1)  # [batch_size, d_model]
+        return global_feat
+
+
 class Model(nn.Module):
     """
     Vanilla Transformer
@@ -93,10 +111,31 @@ class Model(nn.Module):
             self.act = F.gelu
             self.dropout = nn.Dropout(configs.dropout)
             self.projection = nn.Linear(configs.d_model * configs.seq_len, configs.num_class)
-        if self.task_name == 'token_classification':
-            self.act = F.gelu
-            self.dropout = nn.Dropout(configs.dropout)
-            self.projection = nn.Linear(configs.d_model, configs.num_class, bias=True)
+        if self.task_name == 'muti_tasks':            
+            self.sortinghead = nn.Sequential(
+                nn.Linear(configs.d_model, configs.d_model * 2),
+                nn.GELU(),
+                nn.Dropout(configs.head_dropout),
+                nn.Linear(configs.d_model * 2, configs.num_code_classes)
+            )
+            
+            # 分类头：调制类型
+            self.mod_classifier = nn.Sequential(
+                AttentionPool(configs.d_model),
+                nn.Linear(configs.d_model, configs.d_model),
+                nn.GELU(),
+                nn.Dropout(configs.head_dropout),
+                nn.Linear(configs.d_model, configs.num_mod_classes)
+            )
+
+            # 回归头：码元宽度
+            self.symbol_width_regressor = nn.Sequential(
+                AttentionPool(configs.d_model),
+                nn.Linear(configs.d_model, configs.d_model),
+                nn.GELU(),
+                nn.Dropout(configs.head_dropout),
+                nn.Linear(configs.d_model, 1),
+            )
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # Embedding
@@ -136,7 +175,7 @@ class Model(nn.Module):
         output = self.projection(output)  # (batch_size, num_classes)
         return output
     
-    def token_classification(self, x_enc):
+    def muti_tasks(self, x_enc):
         if self.wide_value_emb:
             # x: [B, L=1024, M=5, pos_D=128] ->
             enc_out = rearrange(x_enc, 'b l m d -> b l (m d)')
@@ -144,13 +183,23 @@ class Model(nn.Module):
             # Embedding
             enc_out = self.enc_embedding(x_enc, None)
             
-        enc_out, attns = self.encoder(enc_out, attn_mask=None)
+        encoder_output, attns = self.encoder(enc_out, attn_mask=None)
 
         # Output
-        output = self.act(enc_out)
-        output = self.dropout(output)
-        output = self.projection(output)  # (batch_size, seq_len, num_classes)
-        return output
+        code_seq_logits = self.sortinghead(encoder_output) # [batch_size, seq_len, 1, num_classes]
+
+        # 全局特征用于分类和回归
+        # TODO mean 池化待验证
+        global_feat = encoder_output # .mean(dim=1)  # [batch_size, d_model]
+
+        # 调制类型分类
+        mod_logits = self.mod_classifier(global_feat)  # [batch_size, num_mod_classes]
+
+        # 码元宽度回归
+        symbol_width = self.symbol_width_regressor(global_feat).squeeze(-1)  # [batch_size]
+        
+        return mod_logits, symbol_width, code_seq_logits
+
 
     def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, mask=None):
         if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
@@ -165,8 +214,8 @@ class Model(nn.Module):
         if self.task_name == 'classification':
             dec_out = self.classification(x_enc, x_mark_enc)
             return dec_out  # [B, N]
-        if self.task_name == 'token_classification':
-            dec_out = self.token_classification(x_enc)
+        if self.task_name == 'muti_tasks':
+            dec_out = self.muti_tasks(x_enc)
             return dec_out  # [B, L, N]
         return None
 

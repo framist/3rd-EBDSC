@@ -9,7 +9,7 @@ from einops import rearrange
 
 class Configs():
     def __init__(self):
-        self.task_name = "token_classification"
+        self.task_name = "muti_tasks"
         self.pred_len = None
         self.seq_len = 1024
         self.output_attention = False
@@ -72,7 +72,7 @@ class Model(nn.Module):
             self.act = F.gelu
             self.dropout = nn.Dropout(configs.dropout)
             self.projection = nn.Linear(configs.d_model * configs.enc_in, configs.num_class)
-        if self.task_name == 'token_classification':
+        if self.task_name == 'muti_tasks':
             self.act = F.gelu
             self.dropout = nn.Dropout(configs.dropout)
             self.projection = nn.Linear(configs.d_model, configs.seq_len, bias=True)
@@ -146,7 +146,7 @@ class Model(nn.Module):
         output = self.projection(output)  # (batch_size, num_classes)
         return output
 
-    def token_classification(self, x_enc):
+    def muti_tasks(self, x_enc):
         if self.wide_value_emb:
             # x: [B, L=1024, M=5, pos_D=128] ->
             enc_out = rearrange(x_enc, 'b l m d -> b l (m d)')
@@ -180,8 +180,8 @@ class Model(nn.Module):
         if self.task_name == 'classification':
             dec_out = self.classification(x_enc, x_mark_enc)
             return dec_out  # [B, N]
-        if self.task_name == 'token_classification':
-            dec_out = self.token_classification(x_enc)
+        if self.task_name == 'muti_tasks':
+            dec_out = self.muti_tasks(x_enc)
             return dec_out  # [B, L, N]
         return None
 

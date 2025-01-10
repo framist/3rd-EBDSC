@@ -1,5 +1,5 @@
-# %%
-# Modern TCN 推荐参数
+
+
 import datetime
 # %matplotlib widget
 from typing import List
@@ -157,6 +157,8 @@ elif parser_args.model == 'Transformer':
         configs.d_ff = D * R
         configs.n_heads = 4
         configs.dropout = DROP_OUT
+        configs.num_code_classes = NUM_CODE_CLASSES
+        configs.num_mod_classes = NUM_MOD_CLASSES
 
         model = Model(configs=configs, wide_value_emb=True).to(device)
 
@@ -168,7 +170,9 @@ elif parser_args.model == 'Transformer':
         configs.d_ff = D * R
         configs.n_heads = 2
         configs.dropout = DROP_OUT
-
+        configs.num_code_classes = NUM_CODE_CLASSES
+        configs.num_mod_classes = NUM_MOD_CLASSES
+        
         model = Model(configs=configs, wide_value_emb=False).to(device)
 
     # * TF 使用的优化器
@@ -206,7 +210,8 @@ elif parser_args.model == 'TimesNet':
     configs.e_layers = NUM_LAYERS
     configs.d_ff = D * R
     configs.dropout = DROP_OUT
-
+    configs.num_code_classes = NUM_CODE_CLASSES
+    configs.num_mod_classes = NUM_MOD_CLASSES
 
     model = Model(configs=configs, wide_value_emb=False).to(device)
 
