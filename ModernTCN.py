@@ -30,6 +30,13 @@ class CNNPool(nn.Module):
         global_feat = F.adaptive_max_pool1d(x, 1).squeeze(-1)  # [batch_size, d_model]
         return global_feat
 
+class MeanPool(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        return x.mean(dim=self.dim)
 
 
 class LayerNorm(nn.Module):
@@ -234,7 +241,7 @@ class Stage(nn.Module):
 
 class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长度，可以更换为输出的种类 num_classes
     def __init__(self, *, M, num_code_classes, num_mod_classes, D=128, large_sizes=51, ffn_ratio=2, num_layers=24, 
-                 small_size=5, small_kernel_merged=False, backbone_dropout=0., head_dropout=0., stem=False
+                 small_size=5, small_kernel_merged=False, backbone_dropout=0., head_dropout=0., stem=False, mean_pool=False
                  ):  # 如果能收敛就一点一点增加，在原来跑通的里面层数为
         # M, L, num_classes,
         super(ModernTCN_MutiTask, self).__init__()
@@ -262,7 +269,7 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         
         # 分类头：调制类型
         self.mod_classifier = nn.Sequential(
-            # AttentionPool(D * M),
+            AttentionPool(D * M) if not mean_pool else MeanPool(dim=1),
             nn.Linear(D * M, D * M),
             nn.ReLU(),
             nn.Dropout(head_dropout),
@@ -271,7 +278,7 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
 
         # 回归头：码元宽度
         self.symbol_width_regressor = nn.Sequential(
-            # AttentionPool(D * M),
+            AttentionPool(D * M) if not mean_pool else MeanPool(dim=1),
             nn.Linear(D * M, D * M),
             nn.ReLU(),
             nn.Dropout(head_dropout),
@@ -317,7 +324,7 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
 
         # 全局特征用于分类和回归
         # TODO mean 池化待验证
-        global_feat = encoder_output.mean(dim=1)  # [batch_size, d_model]
+        global_feat = encoder_output # .mean(dim=1)  # [batch_size, d_model]
 
         # 调制类型分类
         mod_logits = self.mod_classifier(global_feat)  # [batch_size, num_mod_classes]

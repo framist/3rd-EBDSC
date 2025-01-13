@@ -1,6 +1,7 @@
 import datetime
 # %matplotlib widget
 from typing import List
+import sys
 
 import numpy as np
 import torch
@@ -20,8 +21,7 @@ seed_everything()
 import wandb
 from ebdsc3rd_datatools import *
 
-NAME = '3nd_AttnHead'
-NAME = '3nd_TFmeanPool'
+NAME = '3nd'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -49,7 +49,7 @@ parser.add_argument('--manual', action='store_true', default=False, help='是否
 
 # wandb
 parser.add_argument('--wandb', action='store_true', default=False, help='是否使用 wandb 记录')
-parser.add_argument('--name', type=str, default=NAME, help='wandb 实验名称')
+parser.add_argument('--name', type=str, default='tmp_exp', help='wandb 实验名称')
 parser.add_argument('--tags', nargs='+', default=['default'], help='wandb 标签，可输入多个')
 
 # 3rd
@@ -58,6 +58,7 @@ parser.add_argument('--max_code_len', type=int, default=400, help='最大码元�
 parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0.3, 0.5], help='多任务损失权重 for MT, SW, CQ')
 parser.add_argument('--mod_uniq_sym', action='store_true', default=False, help='是否使用 mod 独立的符号')
 parser.add_argument('--data_aug', action='store_true', default=False, help='是否使用数据增强')
+parser.add_argument('--meanpool', action='store_true', default=False, help='是否使用 meanpool 而非 attn pool 作为池化')
 
 parser.add_argument('--best_continue', action='store_true', default=False, help='是否继续训练')
 
@@ -84,7 +85,8 @@ DROP_OUT = parser_args.dp # dropout 仅指分类头的。不能在主干。ref. 
 MAX_TRAIN_EPOCH = parser_args.max_epoch
 
 IF_LAERNABLE_EMB = True
-
+NAME += "_MeanPool" if parser_args.meanpool else "_AttnPool"
+NAME += f"_{parser_args.name}"
 
 root_dir = "../train_data/"  # 替换为实际路径
 CODE_MAP_OFFSET = 1  # 码元映射偏移
@@ -105,7 +107,14 @@ PAD_IDX = 0  # 填充符号 ID
 MAX_CODE_LENGTH = parser_args.max_code_len
 MUTITASK_WEIGHTS = parser_args.mutitask_weights
 
+if MUTITASK_WEIGHTS[1] == 0:
+    assert parser_args.true_sym_width, "SW 为 0 时，必须使用真实符号宽度" 
 
+is_debug = True if sys.gettrace() else False
+if is_debug:
+    print("!!!!!!!!!!!!!!! Debugging !!!!!!!!!!!!!!!")
+    assert parser_args.wandb == False, "Debugging 时不支持 wandb"
+    
 # %% 模型、优化器选择
 if parser_args.model == 'modernTCN':
     NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
@@ -127,7 +136,8 @@ if parser_args.model == 'modernTCN':
             small_size=parser_args.ss,
             backbone_dropout=0.,
             head_dropout=DROP_OUT,
-            stem = IF_LAERNABLE_EMB
+            stem = IF_LAERNABLE_EMB,
+            mean_pool=parser_args.meanpool
         ).to(device)
 
 
@@ -164,7 +174,8 @@ elif parser_args.model == 'Transformer':
     configs.dropout = DROP_OUT
     configs.num_code_classes = NUM_CODE_CLASSES
     configs.num_mod_classes = NUM_MOD_CLASSES
-    
+    configs.mean_pool = parser_args.meanpool
+        
     model = Model(configs=configs, wide_value_emb=False).to(device)
 
     # * TF 使用的优化器
@@ -324,15 +335,7 @@ print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 print(f"{model=}")
 
 
-# 5. 验证 DataLoader
-# 打印一个批次的数据形状
-for batch in val_loader:
-    print("IQ_data.shape:", batch["IQ_data"].shape)  # [batch_size, max_IQ_len, 2]
 
-    flops, params = profile(model, inputs=(batch["IQ_data"].to(device),))
-    flops, params = clever_format([flops, params], "%.3f")
-    print(f"FLOPs: {flops}, Params: {params}")
-    break
 
 if parser_args.best_continue:
     model.load_state_dict(torch.load(f"./saved_models/{NAME}_best.pth", map_location=device))    
@@ -378,7 +381,8 @@ for epoch in t:
         total_train_loss += loss.item()
 
         t.set_description(f"{NAME} Loss={loss.item():.2f}")
-        # break
+        if is_debug:
+            break
         
     lr_scheduler.step()
 
@@ -393,6 +397,7 @@ for epoch in t:
     all_mod_labels = []
     all_mod_preds = []
     all_acc = []
+    all_cs = []
     with torch.no_grad():
         for batch in val_loader:
             IQ_data = batch["IQ_data"].to(device)
@@ -429,7 +434,7 @@ for epoch in t:
             # 计算指标
             MT_scores = compute_MT_score(mod_logits, mod_type)
             SW_scores = compute_SW_score(symbol_width_pred, symbol_width)
-            CQ_scores = compute_CQ_score(
+            CQ_scores, cs = compute_CQ_score(
                 code_sed_pred,
                 code_sequence,
                 pad_idx=PAD_IDX,
@@ -444,6 +449,7 @@ for epoch in t:
             all_mod_labels.append(mod_type)
             all_mod_preds.append(mod_logits.argmax(dim=-1))
             all_acc.append(acc)
+            all_cs.append(cs)
 
     avg_val_loss = total_val_loss / len(val_loader)
 
@@ -454,6 +460,7 @@ for epoch in t:
     all_mod_labels = torch.cat(all_mod_labels)  # [num_val_samples]
     all_mod_preds = torch.cat(all_mod_preds)  # [num_val_samples]
     avg_acc = torch.cat(all_acc).mean().item()
+    all_cs = torch.cat(all_cs).mean().item()
 
     # 计算加权总分
     avg_sample_score = 0.2 * avg_MT_scores + 0.3 * avg_SW_scores + 0.5 * avg_CQ_scores
@@ -461,7 +468,7 @@ for epoch in t:
     tqdm.write(
         f"Epoch [{epoch+1}/{MAX_TRAIN_EPOCH}], Train Loss: {avg_train_loss:.4f}, "
         f"Val Loss: {avg_val_loss:.4f}, Val Score: {avg_sample_score:.2f}, "
-        f"MT: {avg_MT_scores:.2f}, SW: {avg_SW_scores:.2f}, CQ: {avg_CQ_scores:.2f}, acc: {avg_acc:.2f}"
+        f"MT: {avg_MT_scores:.2f}, SW: {avg_SW_scores:.2f}, CQ: {avg_CQ_scores:.2f}, acc: {avg_acc:.2f}, cs: {all_cs:.2f}"
     )
 
     if avg_sample_score > best_score:
@@ -482,8 +489,9 @@ for epoch in t:
     if MUTITASK_WEIGHTS[2] > 0.0:
         log["CQ"] = avg_CQ_scores
         log["acc"] = avg_acc
+        log["cs"] = all_cs
 
-    if epoch % 10 == 0:
+    if epoch % 8 == 0:
         # 绘制 类别识别 混淆矩阵
         cm = np.zeros((NUM_MOD_CLASSES, NUM_MOD_CLASSES))
         for target, prediction in zip(all_mod_labels, all_mod_preds):
@@ -504,5 +512,14 @@ for epoch in t:
     if parser_args.wandb:
         wandb.log(log, step=epoch)
 
+
+# 打印一个批次的数据形状
+for batch in val_loader:
+    print("IQ_data.shape:", batch["IQ_data"].shape)  # [batch_size, max_IQ_len, 2]
+
+    flops, params = profile(model, inputs=(batch["IQ_data"].to(device),))
+    flops, params = clever_format([flops, params], "%.3f")
+    print(f"FLOPs: {flops}, Params: {params}")
+    break
 
 wandb.finish()

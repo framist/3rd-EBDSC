@@ -41,9 +41,7 @@ class EBDSC3rdLoader(Dataset):
     # 32APSK: {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}
     START_OFFSET = [0, 2, 6, 14, 16, 24, 40, 72, 80, 96, 128]  # 0 ~ 10(UNKNOWN)
 
-    def __init__(
-        self, root_dir, code_map_offset: int = 1, mod_uniq_symbol: bool = False, data_aug: bool = False
-    ):
+    def __init__(self, root_dir, code_map_offset: int = 1, mod_uniq_symbol: bool = False, data_aug: bool = False):
         """
         Args:
             root_dir (str): 数据集根目录。
@@ -58,7 +56,7 @@ class EBDSC3rdLoader(Dataset):
         self.code_map_offset = code_map_offset
         self.mod_uniq_symbol = mod_uniq_symbol
         self.data_aug = data_aug
-        
+
         # 符号类别数
         if mod_uniq_symbol:
             self.num_code_classes = EBDSC3rdLoader.START_OFFSET[-1] + 1
@@ -103,11 +101,11 @@ class EBDSC3rdLoader(Dataset):
         code_sequence_aligned = repeat_and_pad_sequence(
             symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT, len(IQ_data), mapped_code_sequence, EBDSC3rdLoader.PAD
         )
-                
+
         # 数据增强
         if self.data_aug:
-            # - TODO 截断
-            
+            # TODO 截断
+
             # - 随机镜像
             if np.random.random() < 0.5:
                 IQ_data = np.flip(IQ_data, axis=0).copy()
@@ -115,7 +113,7 @@ class EBDSC3rdLoader(Dataset):
                 mapped_code_sequence = np.flip(mapped_code_sequence, axis=0).copy()
 
         # - 标准化
-        IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)  
+        IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)
 
         return {
             "IQ_data": torch.from_numpy(IQ_data),  # [seq_len, 2]
@@ -269,6 +267,9 @@ def reverse_sequence_from_logits_batch(
 ) -> torch.LongTensor:
     """从展开的 logits 序列恢复原始码序列，支持批处理
 
+    先验 set(symbol_widths_absl)：
+    {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+
     Args:
         symbol_width_absl (Tensor): [batch_size] 每个样本的码元宽度
         expanded_logits (Tensor): [batch_size, seq_len, num_classes] logits 序列
@@ -277,18 +278,25 @@ def reverse_sequence_from_logits_batch(
     Returns:
         Tensor: [batch_size, orig_len] 原始码序列
     """
-    # * Softmax 转换为概率
+    # - Softmax 转换为概率
     expanded_probs = F.softmax(expanded_logits, dim=-1)
     batch_size, seq_len, num_classes = expanded_probs.shape
 
-    repeat_counts = symbol_width_absl.int()  # [batch_size]
-    repeat_counts = torch.clip(repeat_counts, min=5, max=20)  # 根据数据集
+    # - 根据先验选择最近的宽度值
+    allowed_widths = torch.tensor(
+        [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], device=symbol_width_absl.device
+    )
+    # 计算与每个允许值的距离
+    distances = torch.abs(symbol_width_absl.unsqueeze(1) - allowed_widths)
+    # 选择最近的允许值
+    repeat_counts = allowed_widths[torch.argmin(distances, dim=1)]
 
-    # 计算每个样本的原始序列长度
+    # - 计算每个样本的原始序列长度
     orig_lens = torch.div(seq_len, repeat_counts, rounding_mode="floor")
     max_orig_len = orig_lens.max().item()
 
     # 初始化输出
+    # TODO 注意这边的填充了 0
     original_sequences = torch.full((batch_size, max_orig_len), pad, device=expanded_probs.device, dtype=torch.long)
 
     # 对每个样本处理
@@ -309,7 +317,7 @@ def reverse_sequence_from_logits_batch(
     return original_sequences
 
 
-def make_collate_fn(data_aug: bool = False, code_map_offset: int = 1, pad_idx: int = 0):
+def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx: int = 0):
     def collate_fn(batch):
         """
         自定义的 collate 函数，用于处理可变长度的 I/Q 数据和 code_sequence。
@@ -326,7 +334,6 @@ def make_collate_fn(data_aug: bool = False, code_map_offset: int = 1, pad_idx: i
         mod_type_list = [item["mod_type"] for item in batch]
         symbol_width_list = [item["symbol_width"] for item in batch]
         IQ_length_list = [item["IQ_length"] for item in batch]
-        
 
         # 填充 I/Q 数据
         IQ_padded = torch.nn.utils.rnn.pad_sequence(
@@ -356,7 +363,9 @@ def make_collate_fn(data_aug: bool = False, code_map_offset: int = 1, pad_idx: i
             "symbol_width": torch.stack(symbol_width_list),  # [batch_size]
             "code_sequence": code_padded,  # [batch_size, code_len]
         }
+
     return collate_fn
+
 
 def compute_MT_score(mod_logits, mod_labels):
     """
@@ -462,7 +471,7 @@ def compute_CQ_score(
     pad_idx: int = 0,
     code_map_offset: int = 1,
     mod_uniq_symbol: tuple = (False, None, None),
-) -> torch.Tensor:
+):
     """
     计算码序列解调余弦相似度得分 (CQ_score)。
     NOTE 计算时需减去 code_map_offset
@@ -492,7 +501,6 @@ def compute_CQ_score(
         code_seq_labels = torch.where(
             code_seq_labels != 0, code_seq_labels - offset[mod_labels].unsqueeze(1), code_seq_labels
         )
-        # TODO
         assert torch.sum(code_seq_labels < 0) == 0
         assert torch.sum(code_seq_labels > 32) == 0
 
@@ -524,7 +532,7 @@ def compute_CQ_score(
 
     # 将序列转换为向量，并减去 code_map_offset
     true_vec = (
-        code_seq_labels[:, :max_true_length] - code_map_offset
+        code_seq_labels[:, :max_true_length] - code_map_offset # TODO 原本作为填充的 0 会被减去 code_map_offset = -1
     ).float() * mask.float()  # [batch_size, max_true_length]
     pred_vec = (pred_seq_truncated - code_map_offset).float() * mask.float()  # [batch_size, max_true_length]
 
@@ -552,10 +560,7 @@ def compute_CQ_score(
     # 确保分数在 [0, 100] 范围内
     CQ_score = CQ_score.clamp(0.0, 100.0)
 
-    return CQ_score
-
-
-import torch
+    return CQ_score, cosine_similarity
 
 
 def compute_sequence_accuracy(
@@ -700,5 +705,6 @@ if __name__ == "__main__":
     code_map_offset = 1
 
     # 计算 CQ_score
-    cq_scores = compute_CQ_score(code_seq_preds, code_seq_labels, pad_idx, code_map_offset)
+    cq_scores, cs = compute_CQ_score(code_seq_preds, code_seq_labels, pad_idx, code_map_offset)
     print(cq_scores)
+    print(cs)

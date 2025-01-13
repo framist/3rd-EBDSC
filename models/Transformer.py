@@ -27,7 +27,7 @@ class Configs():
         self.head_dropout = 0.5
         self.num_code_classes = None
         self.num_mod_classes = None
-        
+        self.mean_pool = False
         
 # Attention Pooling
 class AttentionPool(nn.Module):
@@ -42,6 +42,14 @@ class AttentionPool(nn.Module):
         global_feat = torch.sum(x * weights, dim=1)  # [batch_size, d_model]
         return global_feat
 
+
+class MeanPool(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        return x.mean(dim=self.dim)
 
 class Model(nn.Module):
     """
@@ -121,7 +129,7 @@ class Model(nn.Module):
             
             # 分类头：调制类型
             self.mod_classifier = nn.Sequential(
-                AttentionPool(configs.d_model),
+                AttentionPool(configs.d_model) if not configs.mean_pool else MeanPool(dim=1),
                 nn.Linear(configs.d_model, configs.d_model),
                 nn.GELU(),
                 nn.Dropout(configs.head_dropout),
@@ -130,7 +138,7 @@ class Model(nn.Module):
 
             # 回归头：码元宽度
             self.symbol_width_regressor = nn.Sequential(
-                AttentionPool(configs.d_model),
+                AttentionPool(configs.d_model) if not configs.mean_pool else MeanPool(dim=1),
                 nn.Linear(configs.d_model, configs.d_model),
                 nn.GELU(),
                 nn.Dropout(configs.head_dropout),
