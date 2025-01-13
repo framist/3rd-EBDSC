@@ -1,5 +1,3 @@
-
-
 import datetime
 # %matplotlib widget
 from typing import List
@@ -23,6 +21,7 @@ import wandb
 from ebdsc3rd_datatools import *
 
 NAME = '3nd_AttnHead'
+NAME = '3nd_TFmeanPool'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -58,6 +57,7 @@ parser.add_argument('--true_sym_width', action='store_true', default=False, help
 parser.add_argument('--max_code_len', type=int, default=400, help='最大码元长度')
 parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0.3, 0.5], help='多任务损失权重 for MT, SW, CQ')
 parser.add_argument('--mod_uniq_sym', action='store_true', default=False, help='是否使用 mod 独立的符号')
+parser.add_argument('--data_aug', action='store_true', default=False, help='是否使用数据增强')
 
 parser.add_argument('--best_continue', action='store_true', default=False, help='是否继续训练')
 
@@ -90,9 +90,14 @@ root_dir = "../train_data/"  # 替换为实际路径
 CODE_MAP_OFFSET = 1  # 码元映射偏移
 
 # 创建 train_loader
-full_dataset = EBDSC3rdLoader(root_dir=root_dir, code_map_offset=CODE_MAP_OFFSET, mod_uniq_symbol=parser_args.mod_uniq_sym)
+full_dataset = EBDSC3rdLoader(
+    root_dir=root_dir,
+    code_map_offset=CODE_MAP_OFFSET,
+    mod_uniq_symbol=parser_args.mod_uniq_sym,
+    data_aug=parser_args.data_aug,
+)
 if parser_args.mod_uniq_sym:
-    NAME += '_mod_uniq_sym'
+    NAME += "_mod_uniq_sym"
 
 NUM_CODE_CLASSES = full_dataset.num_code_classes
 NUM_MOD_CLASSES = full_dataset.num_mod_classes
@@ -149,37 +154,25 @@ if parser_args.model == 'modernTCN':
 elif parser_args.model == 'Transformer':
     from models.Transformer import Configs, Model
     configs = Configs()
-    if not IF_LAERNABLE_EMB:
-        D = 128 * 5
-        NAME = f'TF_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
-        configs.d_model = D
-        configs.e_layers = NUM_LAYERS
-        configs.d_ff = D * R
-        configs.n_heads = 4
-        configs.dropout = DROP_OUT
-        configs.num_code_classes = NUM_CODE_CLASSES
-        configs.num_mod_classes = NUM_MOD_CLASSES
-
-        model = Model(configs=configs, wide_value_emb=True).to(device)
-
-    else:
-        D = 128 * 2
-        NAME = f'TF_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
-        configs.d_model = D
-        configs.e_layers = NUM_LAYERS
-        configs.d_ff = D * R
-        configs.n_heads = 2
-        configs.dropout = DROP_OUT
-        configs.num_code_classes = NUM_CODE_CLASSES
-        configs.num_mod_classes = NUM_MOD_CLASSES
         
-        model = Model(configs=configs, wide_value_emb=False).to(device)
+    D = D * 2
+    NAME = f'TF_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+    configs.d_model = D
+    configs.e_layers = NUM_LAYERS
+    configs.d_ff = D * R
+    configs.n_heads = 2
+    configs.dropout = DROP_OUT
+    configs.num_code_classes = NUM_CODE_CLASSES
+    configs.num_mod_classes = NUM_MOD_CLASSES
+    
+    model = Model(configs=configs, wide_value_emb=False).to(device)
 
     # * TF 使用的优化器
-    learn_rate = 0.
+    learn_rate = parser_args.lr
     optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate)
-    lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 50 ** -1.5)
+    lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 16 ** -1.5)
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
 
 elif parser_args.model == 'iTransformer':
     assert IF_LAERNABLE_EMB == True, "iTransformer 模型必须使用可学习的 emb. TODO"
@@ -196,13 +189,12 @@ elif parser_args.model == 'iTransformer':
     # * TF 使用的优化器
     learn_rate = 0.
     optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate)
-    lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 50 ** -1.5) 
+    lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 16 ** -1.5) 
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 elif parser_args.model == 'TimesNet':
     assert IF_LAERNABLE_EMB == True, "TimesNet 模型必须使用可学习的 emb. TODO"
 
-    D = 128
     NAME = f'TimesNet_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
     from models.TimesNet import Configs, Model
     configs = Configs()
@@ -311,7 +303,7 @@ train_loader = DataLoader(
     train_subset,
     batch_size=BATCH_SIZE,
     shuffle=True,
-    collate_fn=collate_fn,
+    collate_fn=make_collate_fn(),
     num_workers=8,
     pin_memory=bool(torch.cuda.is_available()),
 )
@@ -321,7 +313,7 @@ val_loader = DataLoader(
     val_subset,
     batch_size=BATCH_SIZE * 2,
     shuffle=False,
-    collate_fn=collate_fn,
+    collate_fn=make_collate_fn(),
     num_workers=8,
     pin_memory=bool(torch.cuda.is_available()),
 )
@@ -350,7 +342,7 @@ torch.cuda.empty_cache()
 model.to(device)
 model.train()
 best_score = 0.0
-t = tqdm(range(MAX_TRAIN_EPOCH))
+t = tqdm(range(MAX_TRAIN_EPOCH), dynamic_ncols=True)
 scaler = torch.cuda.amp.GradScaler()
 for epoch in t:
     # - 训练阶段
@@ -387,6 +379,8 @@ for epoch in t:
 
         t.set_description(f"{NAME} Loss={loss.item():.2f}")
         # break
+        
+    lr_scheduler.step()
 
     avg_train_loss = total_train_loss / len(train_loader)
 
@@ -473,7 +467,7 @@ for epoch in t:
     if avg_sample_score > best_score:
         best_score = avg_sample_score
         torch.save(model.state_dict(), f"./saved_models/{NAME}_best.pth")
-        print(f"Saved {NAME}_best.pth with best score {best_score:.2f}")
+        tqdm.write(f"Saved {NAME}_best.pth with best score {best_score:.2f}")
 
     log = {
         "Train Loss": avg_train_loss,

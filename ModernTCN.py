@@ -262,7 +262,7 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         
         # 分类头：调制类型
         self.mod_classifier = nn.Sequential(
-            AttentionPool(D * M),
+            # AttentionPool(D * M),
             nn.Linear(D * M, D * M),
             nn.ReLU(),
             nn.Dropout(head_dropout),
@@ -271,7 +271,7 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
 
         # 回归头：码元宽度
         self.symbol_width_regressor = nn.Sequential(
-            AttentionPool(D * M),
+            # AttentionPool(D * M),
             nn.Linear(D * M, D * M),
             nn.ReLU(),
             nn.Dropout(head_dropout),
@@ -317,7 +317,7 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
 
         # 全局特征用于分类和回归
         # TODO mean 池化待验证
-        global_feat = encoder_output # .mean(dim=1)  # [batch_size, d_model]
+        global_feat = encoder_output.mean(dim=1)  # [batch_size, d_model]
 
         # 调制类型分类
         mod_logits = self.mod_classifier(global_feat)  # [batch_size, num_mod_classes]

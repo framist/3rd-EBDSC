@@ -176,6 +176,9 @@ class Model(nn.Module):
         return output
     
     def muti_tasks(self, x_enc):
+        """
+        TODO Mask
+        """
         if self.wide_value_emb:
             # x: [B, L=1024, M=5, pos_D=128] ->
             enc_out = rearrange(x_enc, 'b l m d -> b l (m d)')
@@ -189,7 +192,6 @@ class Model(nn.Module):
         code_seq_logits = self.sortinghead(encoder_output) # [batch_size, seq_len, 1, num_classes]
 
         # 全局特征用于分类和回归
-        # TODO mean 池化待验证
         global_feat = encoder_output # .mean(dim=1)  # [batch_size, d_model]
 
         # 调制类型分类
