@@ -21,7 +21,7 @@ seed_everything()
 import wandb
 from ebdsc3rd_datatools import *
 
-NAME = '3nd'
+NAME = '3rd'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -97,6 +97,7 @@ full_dataset = EBDSC3rdLoader(
     code_map_offset=CODE_MAP_OFFSET,
     mod_uniq_symbol=parser_args.mod_uniq_sym,
     data_aug=parser_args.data_aug,
+    is_test=False
 )
 if parser_args.mod_uniq_sym:
     NAME += "_mod_uniq_sym"
@@ -112,7 +113,7 @@ if MUTITASK_WEIGHTS[1] == 0:
 
 is_debug = True if sys.gettrace() else False
 if is_debug:
-    print("!!!!!!!!!!!!!!! Debugging !!!!!!!!!!!!!!!")
+    print("\n!!!!!!!!!!!!!!! Debugging !!!!!!!!!!!!!!!\n")
     assert parser_args.wandb == False, "Debugging 时不支持 wandb"
     
 # %% 模型、优化器选择
@@ -287,7 +288,7 @@ class MultiTaskLoss(nn.Module):
 
 if parser_args.wandb:
     wandb.init(
-        project="TCN 3rd fixed",
+        project="TCN 3rd ffixed",
         name=parser_args.name,
         config=parser_args,
         tags=parser_args.tags,
@@ -338,14 +339,17 @@ print(f"{model=}")
 
 
 if parser_args.best_continue:
-    model.load_state_dict(torch.load(f"./saved_models/{NAME}_best.pth", map_location=device))    
+    # model.load_state_dict(torch.load(f"./saved_models/{NAME}_best.pth", map_location=device))    
+    epoch_start = load_checkpoint(model, f"./saved_models/{NAME}_best.pth", optimizer, device)
+else:
+    epoch_start = 0
 
 scaler = GradScaler()
 torch.cuda.empty_cache()
 model.to(device)
 model.train()
 best_score = 0.0
-t = tqdm(range(MAX_TRAIN_EPOCH), dynamic_ncols=True)
+t = tqdm(range(epoch_start, epoch_start + MAX_TRAIN_EPOCH), dynamic_ncols=True)
 scaler = torch.cuda.amp.GradScaler()
 for epoch in t:
     # - 训练阶段
@@ -466,14 +470,14 @@ for epoch in t:
     avg_sample_score = 0.2 * avg_MT_scores + 0.3 * avg_SW_scores + 0.5 * avg_CQ_scores
 
     tqdm.write(
-        f"Epoch [{epoch+1}/{MAX_TRAIN_EPOCH}], Train Loss: {avg_train_loss:.4f}, "
+        f"[{epoch+1}/{MAX_TRAIN_EPOCH}] Train Loss: {avg_train_loss:.4f}, "
         f"Val Loss: {avg_val_loss:.4f}, Val Score: {avg_sample_score:.2f}, "
         f"MT: {avg_MT_scores:.2f}, SW: {avg_SW_scores:.2f}, CQ: {avg_CQ_scores:.2f}, acc: {avg_acc:.2f}, cs: {all_cs:.2f}"
     )
 
     if avg_sample_score > best_score:
         best_score = avg_sample_score
-        torch.save(model.state_dict(), f"./saved_models/{NAME}_best.pth")
+        save_checkpoint(epoch, model, optimizer, f"./saved_models/{NAME}_best.pth")
         tqdm.write(f"Saved {NAME}_best.pth with best score {best_score:.2f}")
 
     log = {

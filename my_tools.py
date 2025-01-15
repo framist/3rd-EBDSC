@@ -75,11 +75,10 @@ def TSNE_visualization(s_feature: np.ndarray, s_labels: np.ndarray, t_feature: n
     plt.show()
 
 
-def save_checkpoint(epoch, loss_record, model: torch.nn.Module, optimizer: torch.optim.Optimizer, path):
+def save_checkpoint(epoch, model: torch.nn.Module, optimizer: torch.optim.Optimizer, path):
     """保存模型 checkpoint"""
     state = {
         'epoch': epoch,
-        'loss_record': loss_record,
         'model': model,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict()
@@ -87,14 +86,13 @@ def save_checkpoint(epoch, loss_record, model: torch.nn.Module, optimizer: torch
     torch.save(state, path)
 
 
-def load_checkpoint(model, path, optimizer: torch.optim.Optimizer = None, device='cuda') -> Tuple[int, Dict[str, List[float]]]:
+def load_checkpoint(model: torch.nn.Module, path, optimizer: torch.optim.Optimizer = None, device='cuda'):
     """加载 checkpoint"""
     state = torch.load(path, map_location=device)
     model.load_state_dict(state['model_state_dict'])
     if optimizer is not None:
         optimizer.load_state_dict(state['optimizer_state_dict'])
-    loss_record = state['loss_record']
-    return state['epoch'], loss_record
+    return state['epoch']
 
 
 def accuracy(predictions: np.ndarray, targets: np.ndarray):
@@ -179,3 +177,160 @@ def load_pretrained_params(model: torch.nn.Module, path='./my_models/tf_s_2time5
     # 3. load the new state dict
     model.load_state_dict(pretrained_dict, strict=False)
     return model
+
+
+
+
+
+
+# %%
+from matplotlib.animation import FuncAnimation
+
+
+def animate_constellation(IQ_data, code_sequence, symbol_width, mod_type, unit=20):
+    """动态绘制星座图
+
+    Args:
+        IQ_data: IQ 采样数据
+        code_sequence: 码字序列
+        symbol_width: 码元宽度
+        mod_type: 调制类型
+        unit: 采样率单位
+    """
+    samples_per_symbol = int(symbol_width * unit)
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # 初始化颜色映射
+    unique_codes = np.unique(code_sequence)
+    colors = plt.cm.rainbow(np.linspace(0, 1, len(unique_codes)))
+    color_map = dict(zip(unique_codes, colors))
+
+    scatter_plots = []
+
+    def init():
+        ax.set_xlim([np.min(IQ_data[:, 0]) - 0.1, np.max(IQ_data[:, 0]) + 0.1])
+        ax.set_ylim([np.min(IQ_data[:, 1]) - 0.1, np.max(IQ_data[:, 1]) + 0.1])
+        ax.grid(True)
+        ax.set_title(f"Constellation ({mod_type})")
+        ax.set_xlabel("I")
+        ax.set_ylabel("Q")
+        return []
+
+    def update(frame):
+        # 清除之前的散点
+        for scatter in scatter_plots:
+            scatter.remove()
+        scatter_plots.clear()
+
+        # 逐渐添加码元
+        for i in range(frame + 1):
+            code = code_sequence[i]
+            start = i * samples_per_symbol
+            end = start + samples_per_symbol
+            points = IQ_data[start:end]
+
+            scatter = ax.scatter(
+                points[:, 0], points[:, 1], c=[color_map[code]], alpha=0.6, marker=".", label=f"Code {code}"
+            )
+            scatter_plots.append(scatter)
+
+        # 更新图例
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys())
+        return scatter_plots
+
+    anim = FuncAnimation(fig, update, frames=len(code_sequence), init_func=init, interval=500, blit=True)
+    plt.show()
+
+
+
+
+# 绘制 IQ 眼图
+def plot_eye_diagram(data_i, data_q, samples_per_symbol=20, spans=2):
+    """绘制眼图
+
+    Args:
+        data_i: I 路数据
+        data_q: Q 路数据
+        samples_per_symbol: 每个符号的采样点数
+        spans: 显示的符号跨度数
+    """
+
+    plt.figure(figsize=(6, 3))
+
+    # I 路眼图
+    plt.subplot(121)
+    window_size = spans * samples_per_symbol
+    num_windows = len(data_i) // window_size
+
+    for i in range(num_windows):
+        start = i * window_size
+        end = start + window_size
+        plt.plot(data_i[start:end], "b", alpha=0.1)
+
+    plt.title("I Channel Eye Diagram")
+    plt.grid(True)
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
+
+    # Q 路眼图
+    plt.subplot(122)
+    for i in range(num_windows):
+        start = i * window_size
+        end = start + window_size
+        plt.plot(data_q[start:end], "r", alpha=0.1)
+
+    plt.title("Q Channel Eye Diagram")
+    plt.grid(True)
+    plt.xlabel("Samples")
+    plt.ylabel("Amplitude")
+
+    plt.tight_layout()
+    plt.show()
+
+
+# 计算 FFT 后的 topk 最大正频率分量
+def compute_topk_freqs_c(data_complex: np.ndarray, topk: int, sample_rate: int = 1):
+    """计算 FFT 后的 topk 最大频率分量
+
+    Args:
+        data_complex: 复数形式的 IQ 采样数据
+        topk: 保留的最大频率分量数
+        sample_rate: 采样率
+    Returns:
+        freqs: 频率分量
+        mags: 对应的幅值
+    """
+    n = len(data_complex)
+    freqs = np.fft.fftfreq(n, d=1 / sample_rate)
+    fft_values = np.fft.fft(data_complex)
+    mags = np.abs(fft_values)
+    idx = np.argsort(mags)[-topk:][::-1]
+    return freqs[idx], mags[idx]
+
+
+def compute_topk_freqs_r(data: np.ndarray, topk: int, sample_rate: int = 1):
+    """计算 FFT 后的 topk 最大频率分量
+
+    Args:
+        data: 采样数据 (实数形式)
+        topk: 保留的最大频率分量数
+        sample_rate: 采样率
+    Returns:
+        freqs: 频率分量
+        mags: 对应的幅值
+    """
+    n = len(data)
+    freqs = np.fft.fftfreq(n, d=1 / sample_rate)[: n // 2]
+    fft_values = np.fft.fft(data)
+    mags = np.abs(fft_values)[: n // 2]
+    idx = np.argsort(mags)[-topk:][::-1]
+    return freqs[idx], mags[idx]
+
+
+def compute_topk_freqs(data_complex: np.ndarray, *args, **kwargs):
+    if np.iscomplexobj(data_complex):
+        return compute_topk_freqs_c(data_complex, *args, **kwargs)
+    else:
+        return compute_topk_freqs_r(data_complex, *args, **kwargs)

@@ -41,7 +41,14 @@ class EBDSC3rdLoader(Dataset):
     # 32APSK: {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}
     START_OFFSET = [0, 2, 6, 14, 16, 24, 40, 72, 80, 96, 128]  # 0 ~ 10(UNKNOWN)
 
-    def __init__(self, root_dir, code_map_offset: int = 1, mod_uniq_symbol: bool = False, data_aug: bool = False):
+    def __init__(
+        self,
+        root_dir,
+        code_map_offset: int = 1,
+        mod_uniq_symbol: bool = False,
+        data_aug: bool = False,
+        is_test: bool = False,
+    ):
         """
         Args:
             root_dir (str): 数据集根目录。
@@ -51,8 +58,12 @@ class EBDSC3rdLoader(Dataset):
                     - 1 -> <UNK> (未知符号)
                     - 2 -> <SOS> (起始符号)
                     - 3 -> <EOS> (终止符号)
+            mod_uniq_symbol (bool): 是否对码元符号进行唯一化。
+            data_aug (bool): 是否进行数据增强。
+            is_test (bool): 是否为测试评估场景
         """
-        self.samples = []
+        self.root_dir = root_dir
+        self.samples = None
         self.code_map_offset = code_map_offset
         self.mod_uniq_symbol = mod_uniq_symbol
         self.data_aug = data_aug
@@ -67,61 +78,81 @@ class EBDSC3rdLoader(Dataset):
         # mod 类别数
         self.num_mod_classes = 11
 
+        if is_test:
+            self._test_loader()
+        else:
+            self._train_loader()
+        self.is_test = is_test
+
+    def _train_loader(self):
+        self.samples = []
         for label in range(11):
-            folder_path = os.path.join(root_dir, EBDSC3rdLoader.MOD_TYPE[label])
+            folder_path = os.path.join(self.root_dir, EBDSC3rdLoader.MOD_TYPE[label])
             if os.path.isdir(folder_path):
                 files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".csv")]
                 self.samples.extend(iter(files))
+
+    def _test_loader(self):
+        test_file_lst = [name for name in os.listdir(self.root_dir) if name.endswith(".csv")]
+        test_file_lst = [os.path.join(self.root_dir, name) for name in test_file_lst]
+        self.samples = test_file_lst
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
+        ans = dict()
+
         file_path = self.samples[idx]
         df = pd.read_csv(file_path, names=EBDSC3rdLoader.DATA_COLUMNS, header=None)
 
         # - 提取 I/Q 数据
         IQ_data = df[["I", "Q"]].dropna().to_numpy().astype(np.float32)
 
-        # - 提取 mod_type 和 symbol_width
-        # mod_type = int(df["mod_type"].dropna().iloc[0]) if not df["mod_type"].dropna().empty else 11  # 11 表示 UNKNOWN
-        mod_type = df["mod_type"].dropna().astype(int).iloc[0] - 1  # 从 0 开始
-        symbol_width = df["symbol_width"].dropna().iloc[0]
+        if not self.is_test:
+            # - 提取 mod_type 和 symbol_width
+            # mod_type = int(df["mod_type"].dropna().iloc[0]) if not df["mod_type"].dropna().empty else 11  # 11 表示 UNKNOWN
+            mod_type = df["mod_type"].dropna().astype(int).iloc[0] - 1  # 从 0 开始
+            symbol_width = df["symbol_width"].dropna().iloc[0]
 
-        # - 提取 code_sequence
-        code_sequence = df["code_sequence"].dropna().astype(int).to_numpy()
+            # - 提取 code_sequence
+            code_sequence = df["code_sequence"].dropna().astype(int).to_numpy()
 
-        # 让位 PAD
-        mapped_code_sequence = code_sequence + self.code_map_offset
-        # 映射为唯一的整数 ID
-        if self.mod_uniq_symbol:
-            mapped_code_sequence = unique_symbol(mapped_code_sequence, mod_type)
+            # 让位 PAD
+            mapped_code_sequence = code_sequence + self.code_map_offset
+            # 映射为唯一的整数 ID
+            if self.mod_uniq_symbol:
+                mapped_code_sequence = unique_symbol(mapped_code_sequence, mod_type)
 
-        # - 对齐 code_sequence
-        code_sequence_aligned = repeat_and_pad_sequence(
-            symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT, len(IQ_data), mapped_code_sequence, EBDSC3rdLoader.PAD
-        )
+            # - 对齐 code_sequence
+            code_sequence_aligned = repeat_and_pad_sequence(
+                symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT, len(IQ_data), mapped_code_sequence, EBDSC3rdLoader.PAD
+            )
 
-        # 数据增强
-        if self.data_aug:
-            # TODO 截断
+            # 数据增强
+            if self.data_aug:
+                # TODO 截断
 
-            # - 随机镜像
-            if np.random.random() < 0.5:
-                IQ_data = np.flip(IQ_data, axis=0).copy()
-                code_sequence_aligned = np.flip(code_sequence_aligned, axis=0).copy()
-                mapped_code_sequence = np.flip(mapped_code_sequence, axis=0).copy()
+                # - 随机镜像
+                if np.random.random() < 0.5:
+                    IQ_data = np.flip(IQ_data, axis=0).copy()
+                    code_sequence_aligned = np.flip(code_sequence_aligned, axis=0).copy()
+                    mapped_code_sequence = np.flip(mapped_code_sequence, axis=0).copy()
+            ans = {
+                "code_sequence_aligned": torch.tensor(code_sequence_aligned, dtype=torch.long),  # [code_len]
+                "mod_type": torch.tensor(mod_type, dtype=torch.long),  # scalar
+                "symbol_width": torch.tensor(symbol_width, dtype=torch.float32),  # scalar
+                "code_sequence": torch.tensor(mapped_code_sequence, dtype=torch.long),  # [code_len]
+            }
 
         # - 标准化
         IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)
 
         return {
+            "filename": os.path.basename(file_path),  # str 文件名，用于测试评估
             "IQ_data": torch.from_numpy(IQ_data),  # [seq_len, 2]
-            "code_sequence_aligned": torch.tensor(code_sequence_aligned, dtype=torch.long),  # [code_len]
-            "mod_type": torch.tensor(mod_type, dtype=torch.long),  # scalar
-            "symbol_width": torch.tensor(symbol_width, dtype=torch.float32),  # scalar
-            "IQ_length": torch.tensor(len(IQ_data), dtype=torch.long),  # scalar
-            "code_sequence": torch.tensor(mapped_code_sequence, dtype=torch.long),  # [code_len]
+            "IQ_length": torch.tensor(len(IQ_data), dtype=torch.long),  # scalar 备用
+            **ans,
         }
 
 
@@ -317,7 +348,7 @@ def reverse_sequence_from_logits_batch(
     return original_sequences
 
 
-def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx: int = 0):
+def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx: int = 0, is_test: bool = False):
     def collate_fn(batch):
         """
         自定义的 collate 函数，用于处理可变长度的 I/Q 数据和 code_sequence。
@@ -327,12 +358,9 @@ def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx
         Returns:
             dict: 包含批处理后的 I/Q 数据、code_sequence、掩码、mod_type 和 symbol_width。
         """
-        # 提取各个字段
+        # 提取各个字段 - test
+        filenames = [item["filename"] for item in batch]
         IQ_data_list = [item["IQ_data"] for item in batch]
-        code_seq_list = [item["code_sequence"] for item in batch]
-        code_seq_aligned_list = [item["code_sequence_aligned"] for item in batch]
-        mod_type_list = [item["mod_type"] for item in batch]
-        symbol_width_list = [item["symbol_width"] for item in batch]
         IQ_length_list = [item["IQ_length"] for item in batch]
 
         # 填充 I/Q 数据
@@ -340,6 +368,18 @@ def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx
             IQ_data_list, batch_first=True, padding_value=pad_idx
         )  # [batch_size, max_IQ_len, 2]
         IQ_lengths = torch.stack(IQ_length_list)  # [batch_size]
+        if is_test:
+            return {
+                "filename": filenames,
+                "IQ_data": IQ_padded,  # [batch_size, max_IQ_len, 2]
+                "IQ_length": IQ_lengths,  # [batch_size]
+            }
+
+        # 提取各个字段 - train
+        code_seq_list = [item["code_sequence"] for item in batch]
+        code_seq_aligned_list = [item["code_sequence_aligned"] for item in batch]
+        mod_type_list = [item["mod_type"] for item in batch]
+        symbol_width_list = [item["symbol_width"] for item in batch]
 
         # 填充 code_sequence_aligned
         code_seq_aligned_list = torch.nn.utils.rnn.pad_sequence(
@@ -475,6 +515,7 @@ def compute_CQ_score(
     """
     计算码序列解调余弦相似度得分 (CQ_score)。
     NOTE 计算时需减去 code_map_offset
+    NOTE 这个函数的逻辑有点繁杂，需要重构
     Args:
         code_seq_preds (Tensor): [batch_size, tgt_seq_len] 预测的码序列
         code_seq_labels (Tensor): [batch_size, tgt_seq_len] 真实的码序列
@@ -508,6 +549,8 @@ def compute_CQ_score(
     true_lengths = (code_seq_labels != pad_idx).sum(dim=1)  # [batch_size]
 
     # 确定每个样本的最大真实长度，以便截断预测序列
+    # TODO 这实际上只是对最大长度截取。向量填充 0 是不是不影响余弦相似度计算？
+    # - 还是得针对每一个样本截取，通过 mask 实现
     max_true_length = true_lengths.max().item()
 
     # 如果预测序列长度超过最大真实长度，进行截断；否则，进行填充
@@ -519,20 +562,28 @@ def compute_CQ_score(
         padding_size = max_true_length - pred_seq_len
 
         padding = torch.full(
-            (batch_size_pred, padding_size), code_map_offset, dtype=code_seq_preds.dtype, device=device
+            (batch_size_pred, padding_size),
+            pad_idx,
+            dtype=code_seq_preds.dtype,
+            device=device,  # NOTE 此处 pad_idx 而非 code_map_offset 填充是为了强调
         )
         pred_seq_truncated = torch.cat([code_seq_preds, padding], dim=1)
 
     # 创建掩码，表示每个位置是否在真实长度内
-    mask = torch.arange(max_true_length, device=device).unsqueeze(0).expand(
+    mask_1 = torch.arange(max_true_length, device=device).unsqueeze(0).expand(
         batch_size, max_true_length
     ) < true_lengths.unsqueeze(
         1
     )  # [batch_size, max_true_length]
 
+    mask_2 = (code_seq_labels != pad_idx)[:, :max_true_length]  # [batch_size, max_true_length]
+    mask_3 = (code_seq_preds != pad_idx)[:, :max_true_length]  # [batch_size, max_true_length]
+    mask = mask_1 & mask_2 & mask_3
+
     # 将序列转换为向量，并减去 code_map_offset
     true_vec = (
-        code_seq_labels[:, :max_true_length] - code_map_offset # TODO 原本作为填充的 0 会被减去 code_map_offset = -1
+        code_seq_labels[:, :max_true_length]
+        - code_map_offset  # TODO 原本作为填充的 0 会被减去 code_map_offset = -1 不过被 mask 掉了
     ).float() * mask.float()  # [batch_size, max_true_length]
     pred_vec = (pred_seq_truncated - code_map_offset).float() * mask.float()  # [batch_size, max_true_length]
 
