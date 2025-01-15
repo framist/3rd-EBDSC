@@ -21,7 +21,7 @@ seed_everything()
 import wandb
 from ebdsc3rd_datatools import *
 
-NAME = '3rd'
+NAME = '3rd_freq'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -94,6 +94,7 @@ CODE_MAP_OFFSET = 1  # 码元映射偏移
 # 创建 train_loader
 full_dataset = EBDSC3rdLoader(
     root_dir=root_dir,
+    demodulator=Demodulator(),
     code_map_offset=CODE_MAP_OFFSET,
     mod_uniq_symbol=parser_args.mod_uniq_sym,
     data_aug=parser_args.data_aug,
@@ -288,7 +289,7 @@ class MultiTaskLoss(nn.Module):
 
 if parser_args.wandb:
     wandb.init(
-        project="TCN 3rd ffixed",
+        project="TCN 3rd freq",
         name=parser_args.name,
         config=parser_args,
         tags=parser_args.tags,

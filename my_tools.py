@@ -291,7 +291,7 @@ def plot_eye_diagram(data_i, data_q, samples_per_symbol=20, spans=2):
 
 
 # 计算 FFT 后的 topk 最大正频率分量
-def compute_topk_freqs_c(data_complex: np.ndarray, topk: int, sample_rate: int = 1):
+def compute_topk_freqs_c(data_complex: np.ndarray, topk: int, sample_rate: float = 1):
     """计算 FFT 后的 topk 最大频率分量
 
     Args:
@@ -310,7 +310,7 @@ def compute_topk_freqs_c(data_complex: np.ndarray, topk: int, sample_rate: int =
     return freqs[idx], mags[idx]
 
 
-def compute_topk_freqs_r(data: np.ndarray, topk: int, sample_rate: int = 1):
+def compute_topk_freqs_r(data: np.ndarray, topk: int, sample_rate: float = 1):
     """计算 FFT 后的 topk 最大频率分量
 
     Args:
@@ -329,8 +329,8 @@ def compute_topk_freqs_r(data: np.ndarray, topk: int, sample_rate: int = 1):
     return freqs[idx], mags[idx]
 
 
-def compute_topk_freqs(data_complex: np.ndarray, *args, **kwargs):
+def compute_topk_freqs(data_complex: np.ndarray, topk: int, sample_rate: float = 1):
     if np.iscomplexobj(data_complex):
-        return compute_topk_freqs_c(data_complex, *args, **kwargs)
+        return compute_topk_freqs_c(data_complex, topk, sample_rate = 1)
     else:
-        return compute_topk_freqs_r(data_complex, *args, **kwargs)
+        return compute_topk_freqs_r(data_complex, topk, sample_rate = 1)

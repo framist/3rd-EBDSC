@@ -9,7 +9,72 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn.functional as F
+from scipy import signal
 import numpy as np
+
+from my_tools import compute_topk_freqs
+
+
+class Demodulator:
+    def __init__(self, freq_topk: int = 1, band_with_ratio: float = 0.5):
+        """初始化解调器"""
+        self.freq_topk = freq_topk
+        self.band_with_ratio = band_with_ratio
+        self.nyquist = 1 / 2
+        # TODO 实现滤波器的选择
+
+    def _downconvert(self, iq_data, carrier_freq):
+        """将信号下变频到基带
+
+        Args:
+            iq_data: 复数 IQ 信号
+            carrier_freq: 载波频率
+
+        Returns:
+            下变频后的信号
+        """
+        t = np.arange(len(iq_data))
+        local_carrier = np.exp(-2j * np.pi * carrier_freq * t)
+        return iq_data * local_carrier
+
+    def _lowpass_filter(self, s, cutoff_freq):
+        """低通滤波
+
+        Args:
+            signal: 输入信号
+            cutoff_freq: 截止频率
+
+        Returns:
+            滤波后的信号
+        """
+        b, a = signal.butter(8, cutoff_freq / self.nyquist, btype="low")
+        return signal.filtfilt(b, a, s)
+
+    def down_conversion(self, iq_data: np.ndarray, symbol_width_absl: float | int):
+        """解调主函数
+
+        Args:
+            iq_data: IQ 数据，shape=(N,2)
+            symbol_width_absl: 码元宽度
+        """
+        # 转换为复数 IQ 信号
+        if not np.iscomplexobj(iq_data):
+            iq_complex = iq_data[:, 0] + 1j * iq_data[:, 1]
+
+        # - 带通滤波
+        pass
+
+        # - 下变频
+        # 找到最大频率分量作为载波频率
+        freqs, _ = compute_topk_freqs(iq_complex, topk=self.freq_topk)
+        carrier_freq = freqs[0]
+
+        s_baseband = self._downconvert(iq_complex, carrier_freq)
+
+        # - 基带低通滤波
+        s_filtered = self._lowpass_filter(s_baseband, 1 / (symbol_width_absl) * self.band_with_ratio)
+
+        return np.stack([s_filtered.real, s_filtered.imag], axis=1)
 
 
 class EBDSC3rdLoader(Dataset):
@@ -44,6 +109,8 @@ class EBDSC3rdLoader(Dataset):
     def __init__(
         self,
         root_dir,
+        *,
+        demodulator: Demodulator = None,
         code_map_offset: int = 1,
         mod_uniq_symbol: bool = False,
         data_aug: bool = False,
@@ -60,9 +127,10 @@ class EBDSC3rdLoader(Dataset):
                     - 3 -> <EOS> (终止符号)
             mod_uniq_symbol (bool): 是否对码元符号进行唯一化。
             data_aug (bool): 是否进行数据增强。
-            is_test (bool): 是否为测试评估场景
+            is_test (bool): 是否为测试评估场景，负责为 train val
         """
         self.root_dir = root_dir
+        self.demodulator = demodulator
         self.samples = None
         self.code_map_offset = code_map_offset
         self.mod_uniq_symbol = mod_uniq_symbol
@@ -138,6 +206,11 @@ class EBDSC3rdLoader(Dataset):
                     IQ_data = np.flip(IQ_data, axis=0).copy()
                     code_sequence_aligned = np.flip(code_sequence_aligned, axis=0).copy()
                     mapped_code_sequence = np.flip(mapped_code_sequence, axis=0).copy()
+                    
+            # - 带通信号解调
+            if self.demodulator is not None:
+                IQ_data = self.demodulator.down_conversion(IQ_data, symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT) # TODO 此处先验
+                
             ans = {
                 "code_sequence_aligned": torch.tensor(code_sequence_aligned, dtype=torch.long),  # [code_len]
                 "mod_type": torch.tensor(mod_type, dtype=torch.long),  # scalar
@@ -146,11 +219,11 @@ class EBDSC3rdLoader(Dataset):
             }
 
         # - 标准化
-        IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)
+        # IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)
 
         return {
             "filename": os.path.basename(file_path),  # str 文件名，用于测试评估
-            "IQ_data": torch.from_numpy(IQ_data),  # [seq_len, 2]
+            "IQ_data": torch.from_numpy(IQ_data).float(),  # [IQ_len, 2]
             "IQ_length": torch.tensor(len(IQ_data), dtype=torch.long),  # scalar 备用
             **ans,
         }
