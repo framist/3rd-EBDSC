@@ -1,6 +1,4 @@
 import datetime
-# %matplotlib widget
-from typing import List
 import sys
 
 import numpy as np
@@ -16,10 +14,12 @@ from thop import clever_format, profile
 from torch.utils.data import random_split
 
 from my_tools import *
+
 seed_everything()
 
 import wandb
 from ebdsc3rd_datatools import *
+from loss import MultiTaskLoss
 
 NAME = '3rd_freq'
 
@@ -40,8 +40,8 @@ parser.add_argument('--ss', type=int, default=5, help='small kernel size')
 parser.add_argument('--dp', type=float, default=0.5, help='drop out')
 parser.add_argument('--max_epoch', type=int, default=64, help='max train epoch')
 
-parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
-parser.add_argument('--lr_step_size', type=int, default=64, help='lr step size')
+parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+parser.add_argument('--lr_step_size', type=int, default=16, help='lr step size')
 
 # 对照、消融实验的一些参数
 parser.add_argument('--model', type=str, default='modernTCN', help='backbone 模型选择')
@@ -59,6 +59,8 @@ parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0
 parser.add_argument('--mod_uniq_sym', action='store_true', default=False, help='是否使用 mod 独立的符号')
 parser.add_argument('--data_aug', action='store_true', default=False, help='是否使用数据增强')
 parser.add_argument('--meanpool', action='store_true', default=False, help='是否使用 meanpool 而非 attn pool 作为池化')
+parser.add_argument('--demod_step', type=int, default=0, help='Demodulator step')
+parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band width rate min=0.5')
 
 parser.add_argument('--best_continue', action='store_true', default=False, help='是否继续训练')
 
@@ -94,7 +96,10 @@ CODE_MAP_OFFSET = 1  # 码元映射偏移
 # 创建 train_loader
 full_dataset = EBDSC3rdLoader(
     root_dir=root_dir,
-    demodulator=Demodulator(),
+    demodulator=Demodulator(
+        bandwidth_ratio=parser_args.demod_br,
+        step=parser_args.demod_step
+    ),
     code_map_offset=CODE_MAP_OFFSET,
     mod_uniq_symbol=parser_args.mod_uniq_sym,
     data_aug=parser_args.data_aug,
@@ -227,65 +232,6 @@ elif parser_args.model == 'TimesNet':
 
 else:
     raise ValueError('model 选择错误')
-
-# 定义 SubsetLoss
-class MultiTaskLoss(nn.Module):
-    def __init__(self, mod_weight=0.2, width_weight=0.3, seq_weight=0.5, pad_idx=0):
-        super().__init__()
-        # 归一化权重
-        total_weight = mod_weight + width_weight + seq_weight
-        self.mod_weight = mod_weight / total_weight
-        self.width_weight = width_weight / total_weight
-        self.seq_weight = seq_weight / total_weight
-        self.pad_idx = pad_idx
-
-    def forward(
-        self,
-        mod_logits,
-        symbol_width_pred,
-        code_seq_logits,
-        mod_labels,
-        symbol_width_labels,
-        code_seq_labels,
-        code_seq_masks,
-    ):
-        """
-        Args:
-            mod_logits (Tensor): [batch_size, num_mod_classes]
-            symbol_width_pred (Tensor): [batch_size]
-            code_seq_logits (Tensor): [batch_size, tgt_seq_len, num_code_classes + 1]
-            mod_labels (Tensor): [batch_size]
-            symbol_width_labels (Tensor): [batch_size]
-            code_seq_labels (Tensor): [batch_size, tgt_seq_len]
-            code_seq_masks (Tensor): [batch_size, tgt_seq_len]
-        Returns:
-            Tensor: 总损失
-        """
-        # 调制类型损失
-        mod_loss = F.cross_entropy(mod_logits, mod_labels)
-
-        # TODO 码元宽度损失
-        # width_loss = F.mse_loss(symbol_width_pred, symbol_width_labels)
-        width_loss = (torch.abs(symbol_width_pred - symbol_width_labels) / symbol_width_labels / 0.2).mean()
-
-        # 码序列损失
-        # 需要将预测的 logits 和 labels 进行适当的变形
-        # 计算交叉熵时忽略填充部分
-        batch_size, tgt_seq_len, num_classes = code_seq_logits.size()
-        
-        # 仅计算非填充部分
-        code_seq_labels = code_seq_labels.reshape(-1)
-        code_seq_logits = code_seq_logits.reshape(-1, num_classes)
-        
-        active_logits = code_seq_logits[code_seq_labels != self.pad_idx]
-        active_labels = code_seq_labels[code_seq_labels != self.pad_idx]
-
-        seq_loss = F.cross_entropy(active_logits, active_labels)
-        return (
-            self.mod_weight * mod_loss
-            + self.width_weight * width_loss
-            + self.seq_weight * seq_loss
-        )
 
 if parser_args.wandb:
     wandb.init(

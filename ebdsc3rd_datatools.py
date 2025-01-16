@@ -16,14 +16,15 @@ from my_tools import compute_topk_freqs
 
 
 class Demodulator:
-    def __init__(self, freq_topk: int = 1, band_with_ratio: float = 0.5):
+    def __init__(self, freq_topk: int = 4, bandwidth_ratio: float = 1, step: int=0):
         """初始化解调器"""
         self.freq_topk = freq_topk
-        self.band_with_ratio = band_with_ratio
+        self.bandwidth_ratio = bandwidth_ratio
         self.nyquist = 1 / 2
+        self.step = step
         # TODO 实现滤波器的选择
 
-    def _downconvert(self, iq_data, carrier_freq):
+    def _downconvert(self, iq_data: np.ndarray, carrier_freq):
         """将信号下变频到基带
 
         Args:
@@ -57,6 +58,9 @@ class Demodulator:
             iq_data: IQ 数据，shape=(N,2)
             symbol_width_absl: 码元宽度
         """
+        if self.step <= 0:
+            return iq_data
+
         # 转换为复数 IQ 信号
         if not np.iscomplexobj(iq_data):
             iq_complex = iq_data[:, 0] + 1j * iq_data[:, 1]
@@ -64,17 +68,20 @@ class Demodulator:
         # - 带通滤波
         pass
 
-        # - 下变频
-        # 找到最大频率分量作为载波频率
-        freqs, _ = compute_topk_freqs(iq_complex, topk=self.freq_topk)
-        carrier_freq = freqs[0]
+        # - 1. 下变频
+        # 找到  top-k 频率分量根据幅度作为概率随机采样载波频率
+        freqs, mags = compute_topk_freqs(iq_complex, topk=self.freq_topk)
+        # mags_softmax = F.softmax(torch.tensor(mags), dim=0).numpy()
+        carrier_freq = np.random.choice(freqs, p=mags / np.sum(mags))
 
-        s_baseband = self._downconvert(iq_complex, carrier_freq)
+        s = self._downconvert(iq_complex, carrier_freq)
+        if self.step <= 1:
+            return np.stack([s.real, s.imag], axis=1)
 
-        # - 基带低通滤波
-        s_filtered = self._lowpass_filter(s_baseband, 1 / (symbol_width_absl) * self.band_with_ratio)
+        # - 2. 基带低通滤波
+        s = self._lowpass_filter(s, 1 / (symbol_width_absl) * self.bandwidth_ratio)
 
-        return np.stack([s_filtered.real, s_filtered.imag], axis=1)
+        return np.stack([s.real, s.imag], axis=1)
 
 
 class EBDSC3rdLoader(Dataset):
@@ -206,11 +213,13 @@ class EBDSC3rdLoader(Dataset):
                     IQ_data = np.flip(IQ_data, axis=0).copy()
                     code_sequence_aligned = np.flip(code_sequence_aligned, axis=0).copy()
                     mapped_code_sequence = np.flip(mapped_code_sequence, axis=0).copy()
-                    
+
             # - 带通信号解调
             if self.demodulator is not None:
-                IQ_data = self.demodulator.down_conversion(IQ_data, symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT) # TODO 此处先验
-                
+                IQ_data = self.demodulator.down_conversion(
+                    IQ_data, symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT
+                )  # TODO 此处先验
+
             ans = {
                 "code_sequence_aligned": torch.tensor(code_sequence_aligned, dtype=torch.long),  # [code_len]
                 "mod_type": torch.tensor(mod_type, dtype=torch.long),  # scalar
@@ -514,71 +523,6 @@ def compute_SW_score(symbol_width_pred, symbol_width_labels):
 
 
 def _compute_CQ_score(
-    code_seq_preds: torch.LongTensor,
-    code_seq_labels: torch.LongTensor,
-    pad_idx: int = 0,
-    code_map_offset: int = 1,
-    mod_uniq_symbol: tuple = (False, None, None),
-):
-    """
-    计算码序列解调余弦相似度得分 (CQ_score)。
-    NOTE 计算时需减去 code_map_offset
-    TODO 提高计算效率
-    Args:
-        code_seq_preds (Tensor): [batch_size, tgt_seq_len]
-        code_seq_labels (Tensor): [batch_size, tgt_seq_len]
-        pad_idx (int): 填充符号的索引
-    Returns:
-        Tensor: [batch_size] 每个样本的 CQ_score
-    """
-    batch_size, tgt_seq_len = code_seq_labels.size()
-    if mod_uniq_symbol[0]:
-        mod_pred = torch.argmax(mod_uniq_symbol[1], dim=-1)
-
-    scores = []
-    true_seqs = code_seq_labels.cpu().numpy()
-    pred_seqs = code_seq_preds.cpu().numpy()
-
-    for i in range(batch_size):
-
-        # 截断或填充预测序列 true_seqs[i] 第一个 0
-        true_length = np.sum(true_seqs[i] != pad_idx)
-
-        pred_seq = pred_seqs[i, :true_length]
-        true_seq = true_seqs[i, :true_length]
-        if len(pred_seq) < true_length:
-            pred_seq = np.pad(
-                pred_seq, (0, true_length - len(pred_seq)), "constant", constant_values=code_map_offset
-            )  # NOTE 使用 code_map_offset 填充
-
-        # 计算余弦相似度
-        true_vec = true_seq.astype(float) - code_map_offset
-        pred_vec = pred_seq.astype(float) - code_map_offset
-        if mod_uniq_symbol[0]:
-            # TODO
-            pred_vec = un_unique_symbol(pred_vec, mod_pred[i])
-            true_vec = un_unique_symbol(true_vec, mod_uniq_symbol[2][i])
-
-        norm_true = np.linalg.norm(true_vec)
-        norm_pred = np.linalg.norm(pred_vec)
-        if norm_true == 0 or norm_pred == 0:
-            CS = 0.0
-        else:
-            CS = np.dot(true_vec, pred_vec) / (norm_true * norm_pred)
-
-        # 转换为 CQ_score
-        if CS < 0.7:
-            CQ_score = 0.0
-        elif CS > 0.95:
-            CQ_score = 100.0
-        else:
-            CQ_score = ((CS - 0.7) / (0.95 - 0.7)) * 100
-        CQ_score = np.clip(CQ_score, 0.0, 100.0)
-        scores.append(CQ_score)
-    return torch.tensor(scores, device=code_seq_preds.device)
-
-
-def compute_CQ_score(
     code_seq_preds: torch.Tensor,
     code_seq_labels: torch.Tensor,
     pad_idx: int = 0,
@@ -588,12 +532,24 @@ def compute_CQ_score(
     """
     计算码序列解调余弦相似度得分 (CQ_score)。
     NOTE 计算时需减去 code_map_offset
-    NOTE 这个函数的逻辑有点繁杂，需要重构
+    TODO 这个函数的逻辑有点繁杂，需要重构：
+        1. 根据向量中的向量中的零元素 不会对余弦相似度产生影响，去除截断的操作
+        2. 不能根据 max_true_length 掩码，而是根据每个样本的实际的长度进行掩码
+        3. 解决以下 bug：
+        File "/ebdsc3rd_datatools.py", line 660, in compute_CQ_score
+            mask = mask_1 & mask_2 & mask_3
+                ~~~~~~~~~~~~~~~~^~~~~~~~
+        RuntimeError: The size of tensor a (396) must match the size of tensor b (330) at non-singleton dimension 1
+
     Args:
         code_seq_preds (Tensor): [batch_size, tgt_seq_len] 预测的码序列
         code_seq_labels (Tensor): [batch_size, tgt_seq_len] 真实的码序列
         pad_idx (int): 填充符号的索引
         code_map_offset (int): 码映射偏移量
+        mod_uniq_symbol (tuple, optional):
+            A tuple indicating whether to modify unique symbols and the related parameters.
+            Expected format: (bool, preds_mod_tensor, labels_mod_tensor).
+            Defaults to (False, None, None).
     Returns:
         Tensor: [batch_size] 每个样本的 CQ_score
     """
@@ -636,9 +592,9 @@ def compute_CQ_score(
 
         padding = torch.full(
             (batch_size_pred, padding_size),
-            pad_idx,
+            pad_idx,  # NOTE 此处 pad_idx 而非 code_map_offset 填充是为了强调
             dtype=code_seq_preds.dtype,
-            device=device,  # NOTE 此处 pad_idx 而非 code_map_offset 填充是为了强调
+            device=device,
         )
         pred_seq_truncated = torch.cat([code_seq_preds, padding], dim=1)
 
@@ -671,6 +627,117 @@ def compute_CQ_score(
     )
 
     # print(f"{cosine_similarity=}")
+    # 转换为 CQ_score
+    CQ_score = torch.zeros_like(cosine_similarity)
+    # CS > 0.95
+    mask_high = cosine_similarity > 0.95
+    CQ_score[mask_high] = 100.0
+    # 0.7 <= CS <= 0.95
+    mask_mid = (cosine_similarity >= 0.7) & (cosine_similarity <= 0.95)
+    CQ_score[mask_mid] = ((cosine_similarity[mask_mid] - 0.7) / (0.95 - 0.7)) * 100
+    # CS < 0.7 保持为 0
+
+    # 确保分数在 [0, 100] 范围内
+    CQ_score = CQ_score.clamp(0.0, 100.0)
+
+    return CQ_score, cosine_similarity
+
+def compute_CQ_score(
+    code_seq_preds: torch.Tensor,
+    code_seq_labels: torch.Tensor,
+    pad_idx: int = 0,
+    code_map_offset: int = 1,
+    mod_uniq_symbol: tuple = (False, None, None),
+):
+    """
+    计算码序列解调余弦相似度得分 (CQ_score)。
+
+    Args:
+        code_seq_preds (Tensor): [batch_size, pred_seq_len] 预测的码序列。
+        code_seq_labels (Tensor): [batch_size, label_seq_len] 真实的码序列。
+        pad_idx (int): 填充符号的索引。
+        code_map_offset (int): 码映射偏移量。
+        mod_uniq_symbol (tuple, optional): 
+            一个元组，指示是否修改唯一符号及相关参数。
+            格式：(bool, preds_mod_tensor, labels_mod_tensor)。
+            默认为 (False, None, None)。
+
+    Returns:
+        Tuple[Tensor, Tensor]: 
+            - CQ_score: [batch_size] 每个样本的 CQ_score。
+            - cosine_similarity: [batch_size] 每个样本的余弦相似度。
+    """
+    device = code_seq_preds.device
+    batch_size_pred, pred_seq_len = code_seq_preds.size()
+    batch_size_label, label_seq_len = code_seq_labels.size()
+
+    # 如果预测序列和标签序列的长度不一致，进行填充以匹配长度
+    if pred_seq_len > label_seq_len:
+        padding_size = pred_seq_len - label_seq_len
+        padding = torch.full(
+            (batch_size_label, padding_size),
+            pad_idx,
+            dtype=code_seq_labels.dtype,
+            device=device,
+        )
+        code_seq_labels = torch.cat([code_seq_labels, padding], dim=1)
+    elif label_seq_len > pred_seq_len:
+        padding_size = label_seq_len - pred_seq_len
+        padding = torch.full(
+            (batch_size_pred, padding_size),
+            pad_idx,
+            dtype=code_seq_preds.dtype,
+            device=device,
+        )
+        code_seq_preds = torch.cat([code_seq_preds, padding], dim=1)
+
+    # 处理唯一符号修改（如果需要）
+    if mod_uniq_symbol[0]:
+        offset = torch.tensor(EBDSC3rdLoader.START_OFFSET, device=device, dtype=torch.long)
+
+        # 修改预测序列
+        mod_preds = torch.argmax(mod_uniq_symbol[1], dim=-1)
+        code_seq_preds = torch.where(
+            code_seq_preds != pad_idx,
+            code_seq_preds - offset[mod_preds].unsqueeze(1),
+            code_seq_preds
+        )
+        code_seq_preds = code_seq_preds.clamp(min=code_map_offset) # TODO
+
+        # 修改标签序列
+        mod_labels = mod_uniq_symbol[2]
+        code_seq_labels = torch.where(
+            code_seq_labels != pad_idx,
+            code_seq_labels - offset[mod_labels].unsqueeze(1),
+            code_seq_labels
+        )
+        assert torch.sum(code_seq_labels < 0) == 0, "标签在修改后存在负值。"
+        assert torch.sum(code_seq_labels > 32) == 0, "标签在修改后超过预期最大值。"
+
+    # 计算每个样本的真实长度（非 pad 的长度）
+    true_lengths = (code_seq_labels != pad_idx).sum(dim=1)  # [batch_size]
+
+    # 创建掩码，表示每个位置是否在真实长度内且预测和标签不为 pad
+    mask_labels = code_seq_labels != pad_idx  # [batch_size, max_seq_len]
+    mask_preds = code_seq_preds != pad_idx  # [batch_size, max_seq_len]
+    combined_mask = mask_labels & mask_preds  # [batch_size, max_seq_len]
+
+    # 将序列转换为向量，并减去 code_map_offset
+    true_vec = (code_seq_labels - code_map_offset).float() * combined_mask.float()  # [batch_size, max_seq_len]
+    pred_vec = (code_seq_preds - code_map_offset).float() * combined_mask.float()  # [batch_size, max_seq_len]
+
+    # 计算余弦相似度
+    dot_product = (true_vec * pred_vec).sum(dim=1)  # [batch_size]
+    norm_true = true_vec.norm(p=2, dim=1)  # [batch_size]
+    norm_pred = pred_vec.norm(p=2, dim=1)  # [batch_size]
+
+    # 处理范数为零的情况，避免除以零
+    cosine_similarity = torch.where(
+        (norm_true == 0) | (norm_pred == 0),
+        torch.zeros_like(dot_product),
+        dot_product / (norm_true * norm_pred)
+    )
+
     # 转换为 CQ_score
     CQ_score = torch.zeros_like(cosine_similarity)
     # CS > 0.95
