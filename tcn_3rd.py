@@ -19,9 +19,9 @@ seed_everything()
 
 import wandb
 from ebdsc3rd_datatools import *
-from loss import MultiTaskLoss
 
-NAME = '3rd_freq'
+
+NAME = '3rd_freq_loss'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -57,7 +57,7 @@ parser.add_argument('--true_sym_width', action='store_true', default=False, help
 parser.add_argument('--max_code_len', type=int, default=400, help='最大码元长度')
 parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0.3, 0.5], help='多任务损失权重 for MT, SW, CQ')
 parser.add_argument('--mod_uniq_sym', action='store_true', default=False, help='是否使用 mod 独立的符号')
-parser.add_argument('--data_aug', action='store_true', default=False, help='是否使用数据增强')
+parser.add_argument('--dont_data_aug', action='store_true', default=False, help='是否不使用数据增强')
 parser.add_argument('--meanpool', action='store_true', default=False, help='是否使用 meanpool 而非 attn pool 作为池化')
 parser.add_argument('--demod_step', type=int, default=0, help='Demodulator step')
 parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band width rate min=0.5')
@@ -102,7 +102,7 @@ full_dataset = EBDSC3rdLoader(
     ),
     code_map_offset=CODE_MAP_OFFSET,
     mod_uniq_symbol=parser_args.mod_uniq_sym,
-    data_aug=parser_args.data_aug,
+    data_aug=not parser_args.dont_data_aug,
     is_test=False
 )
 if parser_args.mod_uniq_sym:
@@ -232,6 +232,68 @@ elif parser_args.model == 'TimesNet':
 
 else:
     raise ValueError('model 选择错误')
+
+
+        
+# 定义 SubsetLoss
+class MultiTaskLoss(nn.Module):
+    def __init__(self, mod_weight=0.2, width_weight=0.3, seq_weight=0.5, pad_idx=0):
+        super().__init__()
+        # 归一化权重
+        total_weight = mod_weight + width_weight + seq_weight
+        self.mod_weight = mod_weight / total_weight
+        self.width_weight = width_weight / total_weight
+        self.seq_weight = seq_weight / total_weight
+        self.pad_idx = pad_idx
+
+    def forward(
+        self,
+        mod_logits,
+        symbol_width_pred,
+        code_seq_logits,
+        mod_labels,
+        symbol_width_labels,
+        code_seq_labels,
+        code_seq_masks,
+    ):
+        """
+        Args:
+            mod_logits (Tensor): [batch_size, num_mod_classes]
+            symbol_width_pred (Tensor): [batch_size]
+            code_seq_logits (Tensor): [batch_size, tgt_seq_len, num_code_classes + 1]
+            mod_labels (Tensor): [batch_size]
+            symbol_width_labels (Tensor): [batch_size]
+            code_seq_labels (Tensor): [batch_size, tgt_seq_len]
+            code_seq_masks (Tensor): [batch_size, tgt_seq_len]
+        Returns:
+            Tensor: 总损失
+        """
+        # - 调制类型损失
+        mod_loss = F.cross_entropy(mod_logits, mod_labels) / np.log(NUM_MOD_CLASSES)
+
+        # TODO - 码元宽度损失
+        # width_loss = F.mse_loss(symbol_width_pred * 20., symbol_width_labels * 20.)
+        width_loss = F.mse_loss(symbol_width_pred, symbol_width_labels) / 0.04 # TODO
+        # width_loss = (torch.abs(symbol_width_pred - symbol_width_labels) / symbol_width_labels / 0.2).mean()
+
+        # - 码序列损失 交叉熵损失 方法
+        # 需要将预测的 logits 和 labels 进行适当的变形
+        # 计算交叉熵时忽略填充部分
+        batch_size, tgt_seq_len, num_classes = code_seq_logits.size()
+
+        # 仅计算非填充部分
+        code_seq_labels = code_seq_labels.reshape(-1)
+        code_seq_logits = code_seq_logits.reshape(-1, num_classes)
+
+        active_logits = code_seq_logits[code_seq_labels != self.pad_idx]
+        active_labels = code_seq_labels[code_seq_labels != self.pad_idx]
+
+        seq_loss = F.cross_entropy(active_logits, active_labels) / np.log(NUM_CODE_CLASSES)
+
+        # TODO - 码序列损失 余弦相似度 方法
+
+        return self.mod_weight * mod_loss + self.width_weight * width_loss + self.seq_weight * seq_loss
+
 
 if parser_args.wandb:
     wandb.init(

@@ -75,62 +75,40 @@ class CosineSimilarityLoss(nn.Module):
         loss = cosine_distance.mean()
 
         return loss
-
-
-# 定义 SubsetLoss
-class MultiTaskLoss(nn.Module):
-    def __init__(self, mod_weight=0.2, width_weight=0.3, seq_weight=0.5, pad_idx=0):
-        super().__init__()
-        # 归一化权重
-        total_weight = mod_weight + width_weight + seq_weight
-        self.mod_weight = mod_weight / total_weight
-        self.width_weight = width_weight / total_weight
-        self.seq_weight = seq_weight / total_weight
-        self.pad_idx = pad_idx
-
-    def forward(
-        self,
-        mod_logits,
-        symbol_width_pred,
-        code_seq_logits,
-        mod_labels,
-        symbol_width_labels,
-        code_seq_labels,
-        code_seq_masks,
-    ):
+    
+    
+class SeqCosineSimilarityLoss(nn.Module):
+    def __init__(self, pad_idx=0, code_map_offset=1):
         """
+        基于余弦相似度的损失函数。
+
         Args:
-            mod_logits (Tensor): [batch_size, num_mod_classes]
-            symbol_width_pred (Tensor): [batch_size]
-            code_seq_logits (Tensor): [batch_size, tgt_seq_len, num_code_classes + 1]
-            mod_labels (Tensor): [batch_size]
-            symbol_width_labels (Tensor): [batch_size]
-            code_seq_labels (Tensor): [batch_size, tgt_seq_len]
-            code_seq_masks (Tensor): [batch_size, tgt_seq_len]
-        Returns:
-            Tensor: 总损失
+            num_classes (int): 类别数量。
+            embedding_dim (int): 嵌入维度。
+            pad_idx (int): 填充符号的索引。
+            code_map_offset (int): 码映射偏移量。
+            mod_uniq_symbol (tuple, optional):
+                一个元组，指示是否修改唯一符号及相关参数。
+                格式：(bool, preds_mod_tensor, labels_mod_tensor)。
+                默认为 (False, None, None)。
         """
-        # - 调制类型损失
-        mod_loss = F.cross_entropy(mod_logits, mod_labels)
+        super(SeqCosineSimilarityLoss, self).__init__()
+        self.pad_idx = pad_idx
+        self.code_map_offset = code_map_offset
 
-        # TODO - 码元宽度损失
-        width_loss = F.mse_loss(symbol_width_pred, symbol_width_labels)
-        # width_loss = (torch.abs(symbol_width_pred - symbol_width_labels) / symbol_width_labels / 0.2).mean()
+    def forward(self, logits, code_seq_labels):
+        """
+        前向传播计算损失。
 
-        # - 码序列损失 交叉熵损失 方法
-        # 需要将预测的 logits 和 labels 进行适当的变形
-        # 计算交叉熵时忽略填充部分
-        batch_size, tgt_seq_len, num_classes = code_seq_logits.size()
+        Args:
+            logits (Tensor): [batch_size, seq_len, num_classes] 模型输出的 logits。
+            code_seq_labels (Tensor): [batch_size, seq_len] 真实的码序列。
 
-        # 仅计算非填充部分
-        code_seq_labels = code_seq_labels.reshape(-1)
-        code_seq_logits = code_seq_logits.reshape(-1, num_classes)
+        Returns:
+            Tensor: 标量损失值。
+        """
 
-        active_logits = code_seq_logits[code_seq_labels != self.pad_idx]
-        active_labels = code_seq_labels[code_seq_labels != self.pad_idx]
-
-        seq_loss = F.cross_entropy(active_logits, active_labels)
-
-        # TODO - 码序列损失 余弦相似度 方法
-
-        return self.mod_weight * mod_loss + self.width_weight * width_loss + self.seq_weight * seq_loss
+        # 创建掩码，忽略填充位置
+        mask = code_seq_labels != self.pad_idx
+        
+        

@@ -88,9 +88,10 @@ class EBDSC3rdLoader(Dataset):
     # 16APSK  16QAM  32APSK  32QAM  8APSK  8PSK  8QAM  BPSK  MSK  QPSK  UNKNOWN
     # 注意文件中的 mod_type 从 1 开始
     # 1: BPSK, 2: QPSK, 3: 8PSK, 4: MSK, 5: 8QAM, 6: 16QAM, 7: 32QAM, 8: 8APSK, 9: 16APSK, 10: 32APSK, 11: UNKNOWN
+    MOD_TYPE_NUM = 11
     MOD_TYPE = dict(
         zip(
-            range(11),
+            range(MOD_TYPE_NUM),
             ["BPSK", "QPSK", "8PSK", "MSK", "8QAM", "16QAM", "32QAM", "8APSK", "16APSK", "32APSK", "UNKNOWN"],
         )
     )
@@ -151,7 +152,7 @@ class EBDSC3rdLoader(Dataset):
         self.num_code_classes = self.num_code_classes + code_map_offset
 
         # mod 类别数
-        self.num_mod_classes = 11
+        self.num_mod_classes = self.MOD_TYPE_NUM
 
         if is_test:
             self._test_loader()
@@ -696,7 +697,7 @@ def compute_CQ_score(
         offset = torch.tensor(EBDSC3rdLoader.START_OFFSET, device=device, dtype=torch.long)
 
         # 修改预测序列
-        mod_preds = torch.argmax(mod_uniq_symbol[1], dim=-1)
+        mod_preds = torch.argmax(mod_uniq_symbol[1], dim=-1) # TODO MT 也是根据预测得到的，现在的效果并不好
         code_seq_preds = torch.where(
             code_seq_preds != pad_idx,
             code_seq_preds - offset[mod_preds].unsqueeze(1),
