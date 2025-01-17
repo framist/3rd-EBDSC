@@ -41,7 +41,7 @@ parser.add_argument('--dp', type=float, default=0.5, help='drop out')
 parser.add_argument('--max_epoch', type=int, default=64, help='max train epoch')
 
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-parser.add_argument('--lr_step_size', type=int, default=16, help='lr step size')
+parser.add_argument('--lr_step_size', type=int, default=10, help='lr step size') # TODO
 
 # 对照、消融实验的一些参数
 parser.add_argument('--model', type=str, default='modernTCN', help='backbone 模型选择')
@@ -53,7 +53,8 @@ parser.add_argument('--name', type=str, default='tmp_exp', help='wandb 实验名
 parser.add_argument('--tags', nargs='+', default=['default'], help='wandb 标签，可输入多个')
 
 # 3rd
-parser.add_argument('--true_sym_width', action='store_true', default=False, help='是否使用真实的符号宽度')
+parser.add_argument('--true_sym_width', action='store_true', default=False, help='是否使用真实的符号宽度 (在对齐输出中)')
+parser.add_argument('--true_mod_type', action='store_true', default=False, help='是否使用真实的调制类型 (在对齐 mod_uniq_sym 输出中)')
 parser.add_argument('--max_code_len', type=int, default=400, help='最大码元长度')
 parser.add_argument('--mutitask_weights', nargs='+', type=float, default=[0.2, 0.3, 0.5], help='多任务损失权重 for MT, SW, CQ')
 parser.add_argument('--mod_uniq_sym', action='store_true', default=False, help='是否使用 mod 独立的符号')
@@ -452,7 +453,11 @@ for epoch in t:
                 code_sequence,
                 pad_idx=PAD_IDX,
                 code_map_offset=full_dataset.code_map_offset,
-                mod_uniq_symbol=(full_dataset.mod_uniq_symbol, mod_logits, mod_type),
+                uniq_symbol_args={
+                    "enable": full_dataset.mod_uniq_symbol,
+                    "mod_preds": torch.argmax(mod_logits, dim=-1) if not parser_args.true_mod_type else mod_type,
+                    "mod_labels": mod_type,
+                }
             )
             acc = compute_sequence_accuracy(code_sed_pred, code_sequence, pad_idx=PAD_IDX)
 

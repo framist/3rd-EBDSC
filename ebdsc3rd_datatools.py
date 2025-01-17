@@ -16,7 +16,7 @@ from my_tools import compute_topk_freqs
 
 
 class Demodulator:
-    def __init__(self, freq_topk: int = 4, bandwidth_ratio: float = 1, step: int=0):
+    def __init__(self, freq_topk: int = 4, bandwidth_ratio: float = 1, step: int = 0):
         """初始化解调器"""
         self.freq_topk = freq_topk
         self.bandwidth_ratio = bandwidth_ratio
@@ -248,44 +248,6 @@ def unique_symbol(code_sequence: np.ndarray, mod_type: int):
     return code_sequence + start
 
 
-def un_unique_symbol(code_sequence, mod_type):
-    """
-    码元符号根据 mod_type 反唯一化
-    modtpye: 0 ~ 10
-    """
-    start = EBDSC3rdLoader.START_OFFSET[mod_type]
-    return code_sequence - start
-
-
-def repeat_and_pad_sequence(symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0):
-    """code_sequence 拓展为 IQ 数据长度 len(mapped_code_sequence) = len(IQ_data)
-    e.g.
-        |<------->| = symbol_width * SYMBOL_WIDTH_UNIT
-        [1,       2,       3... 1] ->
-        [1, 1, 1, 2, 2, 2, 3... 1]
-        |<---------------------->| = len(IQ_data)
-    计算每个码元需要重复的次数
-
-    Args:
-        symbol_width (float): 码元宽度。
-        length (int): IQ 数据长度。
-        code_sequence (np.ndarray): 码序列。
-    Returns:
-        np.ndarray: 拓展后的码序列。
-    """
-    repeat_count = int(symbol_width_absl)  # 数据集中此项一定是整数
-    # 使用 numpy 的 repeat 函数展开码序列
-    s = np.repeat(code_sequence, repeat_count)
-    # 确保展开后的长度与 IQ 数据长度匹配
-    if len(s) > length:
-        s = s[:length]
-    elif len(s) < length:
-        pad_length = length - len(s)
-        s = np.pad(s, (0, pad_length), "constant", constant_values=pad)
-
-    return s
-
-
 def _repeat_and_pad_sequence_batch(
     symbol_width_absl: torch.Tensor, length: int, code_sequence: torch.Tensor, pad: int = 0
 ) -> torch.Tensor:
@@ -319,12 +281,61 @@ def _repeat_and_pad_sequence_batch(
     return s
 
 
-def reverse_sequence(symbol_width_absl: float, expanded_sequence: np.ndarray, pad: int = 0):
+def un_unique_symbol(code_sequence, mod_type):
+    """
+    码元符号根据 mod_type 反唯一化
+    modtpye: 0 ~ 10
+    """
+    start = EBDSC3rdLoader.START_OFFSET[mod_type]
+    return code_sequence - start
+
+
+# TODO 根据 ratio 只保留中心的采样，但至少采样一次，额外返回 mask 提供掩码的函数
+
+
+def repeat_and_pad_sequence(
+    symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0, ratio: float = 1.0
+):
+    """code_sequence 拓展为 IQ 数据长度 len(mapped_code_sequence) = len(IQ_data)
+    e.g.
+        |<------->| = symbol_width_absl
+        [1,       2,       3... 1] ->
+        [1, 1, 1, 2, 2, 2, 3... 1]
+        |<---------------------->| = length == len(IQ_data)
+        [0, 1, 0, 0, 1, 0,  ...  ] (mask based on ratio e.g. 1/3)
+    计算每个码元需要重复的次数
+
+    TODO 根据 ratio 只保留中心的采样，但至少采样一次，额外返回 mask 提供掩码
+
+    Args:
+        symbol_width_absl (float): 码元宽度。
+        length (int): IQ 数据长度。
+        code_sequence (np.ndarray): 码序列。
+    Returns:
+        np.ndarray: 拓展后的码序列。
+    """
+    repeat_count = int(symbol_width_absl)  # 数据集中此项一定是整数
+    # 使用 numpy 的 repeat 函数展开码序列
+    s = np.repeat(code_sequence, repeat_count)
+    # 确保展开后的长度与 IQ 数据长度匹配
+    if len(s) > length:
+        s = s[:length]
+    elif len(s) < length:
+        pad_length = length - len(s)
+        s = np.pad(s, (0, pad_length), "constant", constant_values=pad)
+
+    return s
+
+
+def reverse_sequence(symbol_width_absl: float, expanded_sequence: np.ndarray, pad: int = 0, ratio: float = 1.0):
     """从展开的序列恢复原始码序列
     e.g.
-        [1, 1, 1, 2, 2, 2, 3... 1] ->
+        [?, 1, ?, ?, 2, ?,  ...  ] (ratio <= 1/3)
+        [1, 1, 1, 2, 2, 2, 3... 1] (ratio == 1.) ->
         [1,       2,       3... 1]
         |<------->| = symbol_width_absl
+
+    TODO 根据 ratio 只根据中心的采样恢复
 
     Args:
         symbol_width_absl (float): 码元宽度
@@ -337,13 +348,15 @@ def reverse_sequence(symbol_width_absl: float, expanded_sequence: np.ndarray, pa
     # 每隔 repeat_count 取一个样本
     original_sequence = expanded_sequence[::repeat_count]
     # 移除末尾的 padding（如果存在）
-    # TODO 通过查找最后一个非 PAD 值的位置
+    # TODO 通过查找最后一个非 PAD 值的位置，需要确定下正确性，因为 `?` 可能是 PAD
     last_non_pad = np.where(original_sequence != pad)[0][-1] if len(original_sequence) > 0 else -1
     return original_sequence[: last_non_pad + 1] if last_non_pad >= 0 else np.array([])
 
 
 def reverse_sequence_from_logits(symbol_width_absl: float, expanded_logits: np.ndarray, pad: int = 0):
     """从展开的 logits 序列恢复原始码序列，通过选择窗口内累计概率最大的类别
+
+    TODO 根据 ratio 只根据中心的采样恢复
 
     Args:
         symbol_width_absl (float): 码元宽度
@@ -643,12 +656,17 @@ def _compute_CQ_score(
 
     return CQ_score, cosine_similarity
 
+
 def compute_CQ_score(
     code_seq_preds: torch.Tensor,
     code_seq_labels: torch.Tensor,
     pad_idx: int = 0,
     code_map_offset: int = 1,
-    mod_uniq_symbol: tuple = (False, None, None),
+    uniq_symbol_args: dict = {
+        "enable": False,
+        "mod_preds": None,
+        "mod_labels": None,
+    },
 ):
     """
     计算码序列解调余弦相似度得分 (CQ_score)。
@@ -658,13 +676,13 @@ def compute_CQ_score(
         code_seq_labels (Tensor): [batch_size, label_seq_len] 真实的码序列。
         pad_idx (int): 填充符号的索引。
         code_map_offset (int): 码映射偏移量。
-        mod_uniq_symbol (tuple, optional): 
-            一个元组，指示是否修改唯一符号及相关参数。
-            格式：(bool, preds_mod_tensor, labels_mod_tensor)。
-            默认为 (False, None, None)。
+        mod_uniq_symbol (dict, optional): 是否对码元符号进行唯一化。默认为 False。
+            - enable (bool): 是否启用唯一化。
+            - mod_preds (Tensor): [batch_size] 预测的 mod 类别。
+            - mod_labels (Tensor): [batch_size] 真实的 mod 类别。
 
     Returns:
-        Tuple[Tensor, Tensor]: 
+        Tuple[Tensor, Tensor]:
             - CQ_score: [batch_size] 每个样本的 CQ_score。
             - cosine_similarity: [batch_size] 每个样本的余弦相似度。
     """
@@ -693,24 +711,25 @@ def compute_CQ_score(
         code_seq_preds = torch.cat([code_seq_preds, padding], dim=1)
 
     # 处理唯一符号修改（如果需要）
-    if mod_uniq_symbol[0]:
+    if uniq_symbol_args["enable"]:
         offset = torch.tensor(EBDSC3rdLoader.START_OFFSET, device=device, dtype=torch.long)
 
         # 修改预测序列
-        mod_preds = torch.argmax(mod_uniq_symbol[1], dim=-1) # TODO MT 也是根据预测得到的，现在的效果并不好
+        mod_preds = uniq_symbol_args["mod_preds"]
+        c = code_seq_preds
+        # 先限制在 [offset[mod_preds], offset[mod_preds+1]) 范围内
+        c = c.clamp(min=offset[mod_preds].unsqueeze(1) + code_map_offset, max=offset[mod_preds + 1].unsqueeze(1) - 1 + code_map_offset)
+        # 去除偏置
+        c = c - offset[mod_preds].unsqueeze(1)
         code_seq_preds = torch.where(
-            code_seq_preds != pad_idx,
-            code_seq_preds - offset[mod_preds].unsqueeze(1),
-            code_seq_preds
+            code_seq_preds != pad_idx, c, code_seq_preds
         )
-        code_seq_preds = code_seq_preds.clamp(min=code_map_offset) # TODO
+        # assert torch.sum(code_seq_preds < 0) == 0, "预测在修改后存在负值。"
 
         # 修改标签序列
-        mod_labels = mod_uniq_symbol[2]
+        mod_labels = uniq_symbol_args["mod_labels"]
         code_seq_labels = torch.where(
-            code_seq_labels != pad_idx,
-            code_seq_labels - offset[mod_labels].unsqueeze(1),
-            code_seq_labels
+            code_seq_labels != pad_idx, code_seq_labels - offset[mod_labels].unsqueeze(1), code_seq_labels
         )
         assert torch.sum(code_seq_labels < 0) == 0, "标签在修改后存在负值。"
         assert torch.sum(code_seq_labels > 32) == 0, "标签在修改后超过预期最大值。"
@@ -734,9 +753,7 @@ def compute_CQ_score(
 
     # 处理范数为零的情况，避免除以零
     cosine_similarity = torch.where(
-        (norm_true == 0) | (norm_pred == 0),
-        torch.zeros_like(dot_product),
-        dot_product / (norm_true * norm_pred)
+        (norm_true == 0) | (norm_pred == 0), torch.zeros_like(dot_product), dot_product / (norm_true * norm_pred)
     )
 
     # 转换为 CQ_score
