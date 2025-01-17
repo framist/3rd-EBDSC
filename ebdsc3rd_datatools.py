@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from scipy import signal
+from sklearn.metrics import accuracy_score
 import numpy as np
 
 from my_tools import compute_topk_freqs
@@ -123,6 +124,7 @@ class EBDSC3rdLoader(Dataset):
         mod_uniq_symbol: bool = False,
         data_aug: bool = False,
         is_test: bool = False,
+        sample_rate: float = 1.0,
     ):
         """
         Args:
@@ -143,6 +145,7 @@ class EBDSC3rdLoader(Dataset):
         self.code_map_offset = code_map_offset
         self.mod_uniq_symbol = mod_uniq_symbol
         self.data_aug = data_aug
+        self.sample_rate = sample_rate
 
         # 符号类别数
         if mod_uniq_symbol:
@@ -202,7 +205,11 @@ class EBDSC3rdLoader(Dataset):
 
             # - 对齐 code_sequence
             code_sequence_aligned = repeat_and_pad_sequence(
-                symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT, len(IQ_data), mapped_code_sequence, EBDSC3rdLoader.PAD
+                symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,
+                len(IQ_data),
+                mapped_code_sequence,
+                EBDSC3rdLoader.PAD,
+                self.sample_rate,
             )
 
             # 数据增强
@@ -290,11 +297,85 @@ def un_unique_symbol(code_sequence, mod_type):
     return code_sequence - start
 
 
-# TODO 根据 ratio 只保留中心的采样，但至少采样一次，额外返回 mask 提供掩码的函数
+# TODO 根据 ratio 只保留中心的采样（请不要均匀分布，而是优先采样靠近中间的码元），但至少采样一次，额外返回 mask 提供掩码的函数
+def _sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_rate: float = 1.0):
+    """根据 ratio 采样码序列 (中心优先的采样)，并返回掩码
+    e.g.
+        |<------->| = symbol_width_absl
+        [1, 1, 1, 2, 2, 2, 3... 1] ->
+        [0, 1, 0, 0, 1, 0,  ...  ] (mask based on ratio e.g. 1/3)
+        |<---------------------->| = length == len(IQ_data)
+
+    Args:
+        symbol_width_absl (float): 码元宽度
+        length (int): IQ 数据长度
+        pad (int): 填充值
+        ratio (float): 采样比例
+    Returns:
+        np.ndarray: 采样后的码序列
+        np.ndarray: 掩码
+    """
+    repeat_count = int(symbol_width_absl)
+    # 生成采样掩码
+    mask = np.ones(length, dtype=np.int64) * pad
+    mask[repeat_count // 2 :: repeat_count] = 1
+    return mask
+
+
+def sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_rate: float = 0.3):
+    """
+    根据 ratio 采样码序列 (中心优先的采样)，并返回掩码。
+    根据比例 ratio 选择要采样的码元区域，并确保采样从序列中心开始向外扩展。
+    保证至少采样一次中心点。
+
+    e.g.
+        |<------->| = symbol_width_absl
+        [1, 1, 1, 2, 2, 2, 3... 1] ->
+        [0, 1, 0, 0, 1, 0,  ...  ] (mask based on ratio e.g. 1/3)
+        |<---------------------->| = length == len(IQ_data)
+
+    Args:
+        symbol_width_absl (float): 码元宽度
+        length (int): IQ 数据长度
+        pad (int): 填充值
+        ratio (float): 采样比例（0 到 1 之间，表示采样比例）
+
+    Returns:
+        np.ndarray: 采样后的码序列掩码
+        np.ndarray: 掩码
+    """
+    # 计算每个码元内的采样数量
+    num_samples = max(1, int(symbol_width_absl * sample_rate))  # 每个码元的采样点数，确保至少一个
+    repeat_count = int(symbol_width_absl)  # 每个码元的宽度（取整）
+
+    # 计算码元的总数
+    num_symbols = length // repeat_count
+
+    # 初始化掩码，默认填充值
+    mask = np.full(length, pad, dtype=np.int64)
+
+    # 计算偏移量范围
+    half_samples = num_samples // 2  # 采样点偏移的半宽度
+
+    # 批量计算所有采样点
+    sample_indices = []
+    for symbol_idx in range(num_symbols):
+        center_idx = symbol_idx * repeat_count + repeat_count // 2  # 中心点索引
+        # 计算当前码元的采样点索引范围
+        start_idx = max(0, center_idx - half_samples)  # 确保不越界
+        end_idx = min(length, center_idx + half_samples + 1)  # 确保不越界
+
+        # 生成当前码元的采样点
+        sample_indices.extend(range(start_idx, end_idx))
+
+    # 使用 NumPy 设置采样点为 1（避免逐一访问）
+    mask[np.array(sample_indices)] = 1
+
+    return mask
 
 
 def repeat_and_pad_sequence(
-    symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0, ratio: float = 1.0
+    symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0, sample_rate: float = 0.3
 ):
     """code_sequence 拓展为 IQ 数据长度 len(mapped_code_sequence) = len(IQ_data)
     e.g.
@@ -324,10 +405,10 @@ def repeat_and_pad_sequence(
         pad_length = length - len(s)
         s = np.pad(s, (0, pad_length), "constant", constant_values=pad)
 
-    return s
+    return s * sample_masking(symbol_width_absl, length, pad, sample_rate)
 
 
-def reverse_sequence(symbol_width_absl: float, expanded_sequence: np.ndarray, pad: int = 0, ratio: float = 1.0):
+def _reverse_sequence(symbol_width_absl: float, expanded_sequence: np.ndarray, pad: int = 0, sample_rate: float = 1.0):
     """从展开的序列恢复原始码序列
     e.g.
         [?, 1, ?, ?, 2, ?,  ...  ] (ratio <= 1/3)
@@ -353,7 +434,7 @@ def reverse_sequence(symbol_width_absl: float, expanded_sequence: np.ndarray, pa
     return original_sequence[: last_non_pad + 1] if last_non_pad >= 0 else np.array([])
 
 
-def reverse_sequence_from_logits(symbol_width_absl: float, expanded_logits: np.ndarray, pad: int = 0):
+def _reverse_sequence_from_logits(symbol_width_absl: float, expanded_logits: np.ndarray, pad: int = 0):
     """从展开的 logits 序列恢复原始码序列，通过选择窗口内累计概率最大的类别
 
     TODO 根据 ratio 只根据中心的采样恢复
@@ -390,9 +471,11 @@ def reverse_sequence_from_logits(symbol_width_absl: float, expanded_logits: np.n
 
 
 def reverse_sequence_from_logits_batch(
-    symbol_width_absl: torch.Tensor, expanded_logits: torch.Tensor, pad: int = 0
+    symbol_width_absl: torch.Tensor, expanded_logits: torch.Tensor, pad: int = 0, sample_rate: float = 0.3
 ) -> torch.LongTensor:
     """从展开的 logits 序列恢复原始码序列，支持批处理
+
+    TODO 根据 ratio 只根据中心的采样恢复
 
     先验 set(symbol_widths_absl)：
     {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
@@ -428,8 +511,11 @@ def reverse_sequence_from_logits_batch(
 
     # 对每个样本处理
     for b in range(batch_size):
+        # sample_masking
+        mask = sample_masking(repeat_counts[b], seq_len, pad, sample_rate)
+        expanded_prob = expanded_probs[b] * torch.tensor(mask, device=expanded_probs.device).unsqueeze(-1)
         # 使用 unfold 切分窗口
-        windows = expanded_probs[b].unfold(
+        windows = expanded_prob.unfold(
             0, repeat_counts[b], repeat_counts[b]
         )  # [num_windows, repeat_count, num_classes]
 
@@ -718,12 +804,13 @@ def compute_CQ_score(
         mod_preds = uniq_symbol_args["mod_preds"]
         c = code_seq_preds
         # 先限制在 [offset[mod_preds], offset[mod_preds+1]) 范围内
-        c = c.clamp(min=offset[mod_preds].unsqueeze(1) + code_map_offset, max=offset[mod_preds + 1].unsqueeze(1) - 1 + code_map_offset)
+        c = c.clamp(
+            min=offset[mod_preds].unsqueeze(1) + code_map_offset,
+            max=offset[mod_preds + 1].unsqueeze(1) - 1 + code_map_offset,
+        )
         # 去除偏置
         c = c - offset[mod_preds].unsqueeze(1)
-        code_seq_preds = torch.where(
-            code_seq_preds != pad_idx, c, code_seq_preds
-        )
+        code_seq_preds = torch.where(code_seq_preds != pad_idx, c, code_seq_preds)
         # assert torch.sum(code_seq_preds < 0) == 0, "预测在修改后存在负值。"
 
         # 修改标签序列
@@ -734,9 +821,6 @@ def compute_CQ_score(
         assert torch.sum(code_seq_labels < 0) == 0, "标签在修改后存在负值。"
         assert torch.sum(code_seq_labels > 32) == 0, "标签在修改后超过预期最大值。"
 
-    # 计算每个样本的真实长度（非 pad 的长度）
-    true_lengths = (code_seq_labels != pad_idx).sum(dim=1)  # [batch_size]
-
     # 创建掩码，表示每个位置是否在真实长度内且预测和标签不为 pad
     mask_labels = code_seq_labels != pad_idx  # [batch_size, max_seq_len]
     mask_preds = code_seq_preds != pad_idx  # [batch_size, max_seq_len]
@@ -745,6 +829,9 @@ def compute_CQ_score(
     # 将序列转换为向量，并减去 code_map_offset
     true_vec = (code_seq_labels - code_map_offset).float() * combined_mask.float()  # [batch_size, max_seq_len]
     pred_vec = (code_seq_preds - code_map_offset).float() * combined_mask.float()  # [batch_size, max_seq_len]
+    
+    # TODO acc
+    acc = accuracy_score(code_seq_labels[mask_labels].cpu(), code_seq_preds[mask_labels].cpu())
 
     # 计算余弦相似度
     dot_product = (true_vec * pred_vec).sum(dim=1)  # [batch_size]
@@ -769,86 +856,8 @@ def compute_CQ_score(
     # 确保分数在 [0, 100] 范围内
     CQ_score = CQ_score.clamp(0.0, 100.0)
 
-    return CQ_score, cosine_similarity
+    return CQ_score, cosine_similarity, acc
 
-
-def compute_sequence_accuracy(
-    code_seq_preds: torch.Tensor, code_seq_labels: torch.Tensor, pad_idx: int = 0, code_map_offset: int = 1
-) -> torch.Tensor:
-    """
-    计算序列准确率（Sequence Accuracy）。
-
-    序列准确率衡量预测序列与真实序列在所有非填充位置上匹配的比例。
-
-    Args:
-        code_seq_preds (Tensor): [batch_size, pred_seq_len] 预测的码序列。
-        code_seq_labels (Tensor): [batch_size, label_seq_len] 真实的码序列。
-        pad_idx (int, optional): 填充符号的索引。默认为 0。
-        code_map_offset (int, optional): 码映射偏移量。默认为 1。
-
-    Returns:
-        Tensor: [batch_size] 每个样本的序列准确率，值介于 0.0 和 1.0 之间。
-    """
-    device = code_seq_preds.device
-    batch_size_pred, pred_seq_len = code_seq_preds.size()
-    batch_size_label, label_seq_len = code_seq_labels.size()
-
-    if batch_size_pred != batch_size_label:
-        raise ValueError("code_seq_preds 和 code_seq_labels 的 batch_size 必须相同")
-
-    # 计算每个样本的真实长度（非 pad 的长度）
-    true_lengths = (code_seq_labels != pad_idx).sum(dim=1)  # [batch_size]
-
-    # 确定每个样本的最大真实长度
-    max_true_length = true_lengths.max().item()
-
-    # 截断或填充预测序列至最大真实长度
-    if pred_seq_len > max_true_length:
-        # 截断预测序列
-        pred_seq_truncated = code_seq_preds[:, :max_true_length]
-    else:
-        # 填充预测序列，使其长度与最大真实长度一致
-        padding_size = max_true_length - pred_seq_len
-        if padding_size > 0:
-            padding = torch.full((batch_size_pred, padding_size), pad_idx, dtype=code_seq_preds.dtype, device=device)
-            pred_seq_truncated = torch.cat([code_seq_preds, padding], dim=1)
-        else:
-            pred_seq_truncated = code_seq_preds
-
-    # 截断真实序列至最大真实长度
-    true_seq_truncated = code_seq_labels[:, :max_true_length]
-
-    # 创建一个掩码，表示每个位置是否在真实长度内
-    # [batch_size, max_true_length]
-    mask = torch.arange(max_true_length, device=device).unsqueeze(0).expand(
-        batch_size_label, max_true_length
-    ) < true_lengths.unsqueeze(1)
-
-    # 填充预测序列：使用 code_map_offset 填充预测序列的无效位置
-    # 这样在减去 code_map_offset 后，填充位置的值为 0
-    pred_seq_padded = torch.where(mask, pred_seq_truncated, torch.full_like(pred_seq_truncated, code_map_offset))
-
-    # 将序列转换为向量，并减去 code_map_offset
-    # 有效位置的值为 (value - code_map_offset)
-    # 填充位置的值为 (code_map_offset - code_map_offset) = 0
-    true_vec = (true_seq_truncated - code_map_offset).float() * mask.float()  # [batch_size, max_true_length]
-    pred_vec = (pred_seq_padded - code_map_offset).float() * mask.float()  # [batch_size, max_true_length]
-
-    # 比较预测序列与真实序列是否匹配
-    # 仅考虑掩码为 True 的位置
-    correct = (true_vec == pred_vec) & mask  # [batch_size, max_true_length]
-
-    # 计算每个样本的正确预测数
-    correct_counts = correct.sum(dim=1).float()  # [batch_size]
-
-    # 计算每个样本的准确率
-    # 避免除以零：将 true_lengths 中为 0 的样本设定为 1.0（定义为空序列为完全正确）
-    per_sample_accuracy = correct_counts / true_lengths.clamp(min=1).float()  # [batch_size]
-
-    # 对于 true_length 为 0 的样本，设定准确率为 1.0
-    per_sample_accuracy = torch.where(true_lengths > 0, per_sample_accuracy, torch.ones_like(per_sample_accuracy))
-
-    return per_sample_accuracy
 
 
 # 示例用法
@@ -875,10 +884,6 @@ if __name__ == "__main__":
     pad_idx = 0
     code_map_offset = 1
 
-    # 计算序列准确率
-    per_sample_accuracy = compute_sequence_accuracy(code_seq_preds, code_seq_labels, pad_idx, code_map_offset)
-
-    print("Per-sample Accuracy:", per_sample_accuracy)
 
     # for i in range(1, 32):
     #     l = torch.ones((2, 32)) + 5
@@ -914,6 +919,16 @@ if __name__ == "__main__":
     code_map_offset = 1
 
     # 计算 CQ_score
-    cq_scores, cs = compute_CQ_score(code_seq_preds, code_seq_labels, pad_idx, code_map_offset)
+    cq_scores, cs, acc = compute_CQ_score(code_seq_preds, code_seq_labels, pad_idx, code_map_offset)
     print(cq_scores)
     print(cs)
+    print(acc)
+
+    # - sample_masking 示例使用
+    symbol_width_absl = 7  # 例如每个码元宽度为 6
+    length = 60  # 数据长度
+    pad = 0  # 填充值
+    ratio = 0.5  # 采样比例
+
+    mask = sample_masking(symbol_width_absl, length, pad, ratio)
+    print(mask)

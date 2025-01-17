@@ -21,7 +21,7 @@ import wandb
 from ebdsc3rd_datatools import *
 
 
-NAME = '3rd_freq_loss'
+NAME = '3rd_sample_masking'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -62,6 +62,7 @@ parser.add_argument('--dont_data_aug', action='store_true', default=False, help=
 parser.add_argument('--meanpool', action='store_true', default=False, help='是否使用 meanpool 而非 attn pool 作为池化')
 parser.add_argument('--demod_step', type=int, default=0, help='Demodulator step')
 parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band width rate min=0.5')
+parser.add_argument('--sample_rate', type=float, default=0.3, help='sample masking rate')
 
 parser.add_argument('--best_continue', action='store_true', default=False, help='是否继续训练')
 
@@ -104,7 +105,8 @@ full_dataset = EBDSC3rdLoader(
     code_map_offset=CODE_MAP_OFFSET,
     mod_uniq_symbol=parser_args.mod_uniq_sym,
     data_aug=not parser_args.dont_data_aug,
-    is_test=False
+    is_test=False,
+    sample_rate=parser_args.sample_rate
 )
 if parser_args.mod_uniq_sym:
     NAME += "_mod_uniq_sym"
@@ -440,6 +442,7 @@ for epoch in t:
                     symbol_width_absl=(symbol_width if parser_args.true_sym_width else symbol_width_pred) * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT,
                     expanded_logits=code_seq_logits,
                     pad=PAD_IDX,
+                    sample_rate=full_dataset.sample_rate,
                 )
             else:
                 # 不评分
@@ -448,7 +451,7 @@ for epoch in t:
             # 计算指标
             MT_scores = compute_MT_score(mod_logits, mod_type)
             SW_scores = compute_SW_score(symbol_width_pred, symbol_width)
-            CQ_scores, cs = compute_CQ_score(
+            CQ_scores, cs, acc = compute_CQ_score(
                 code_sed_pred,
                 code_sequence,
                 pad_idx=PAD_IDX,
@@ -459,7 +462,6 @@ for epoch in t:
                     "mod_labels": mod_type,
                 }
             )
-            acc = compute_sequence_accuracy(code_sed_pred, code_sequence, pad_idx=PAD_IDX)
 
             all_MT_scores.append(MT_scores)
             all_SW_scores.append(SW_scores)
@@ -506,8 +508,8 @@ for epoch in t:
         log["SW"] = avg_SW_scores
     if MUTITASK_WEIGHTS[2] > 0.0:
         log["CQ"] = avg_CQ_scores
-        log["acc"] = avg_acc
         log["cs"] = all_cs
+        log["Acc"] = avg_acc
 
     if epoch % 8 == 0:
         # 绘制 类别识别 混淆矩阵
