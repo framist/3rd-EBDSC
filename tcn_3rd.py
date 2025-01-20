@@ -41,7 +41,7 @@ parser.add_argument('--dp', type=float, default=0.5, help='drop out')
 parser.add_argument('--max_epoch', type=int, default=64, help='max train epoch')
 
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
-parser.add_argument('--lr_step_size', type=int, default=10, help='lr step size') # TODO
+parser.add_argument('--lr_step_size', type=int, default=16, help='lr step size') # TODO
 
 # 对照、消融实验的一些参数
 parser.add_argument('--model', type=str, default='modernTCN', help='backbone 模型选择')
@@ -62,9 +62,9 @@ parser.add_argument('--dont_data_aug', action='store_true', default=False, help=
 parser.add_argument('--meanpool', action='store_true', default=False, help='是否使用 meanpool 而非 attn pool 作为池化')
 parser.add_argument('--demod_step', type=int, default=0, help='Demodulator step')
 parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band width rate min=0.5')
-parser.add_argument('--sample_rate', type=float, default=0.3, help='sample masking rate')
+parser.add_argument('--sample_rate', type=float, default=1, help='sample masking rate')
 
-parser.add_argument('--best_continue', action='store_true', default=False, help='是否继续训练')
+parser.add_argument('--best_continue', type=int, default=0, help='是否继续训练，0 为否，> 1 为继续次数')
 
 parser_args = parser.parse_args()
 
@@ -168,7 +168,7 @@ if parser_args.model == 'modernTCN':
     # < 200 e 0.0005
     # < 250 e 0.00025
     # < 300 e 0.000125
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5) # TODO last_epoch
 
 
 elif parser_args.model == 'Transformer':
@@ -192,7 +192,7 @@ elif parser_args.model == 'Transformer':
     learn_rate = parser_args.lr
     optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate)
     lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 16 ** -1.5)
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda) # TODO last_epoch
 
 
 elif parser_args.model == 'iTransformer':
@@ -351,10 +351,13 @@ print(f"{model=}")
 
 
 if parser_args.best_continue:
-    # model.load_state_dict(torch.load(f"./saved_models/{NAME}_best.pth", map_location=device))    
+    for _ in range(parser_args.best_continue - 1):
+        NAME += "_c"
     epoch_start = load_checkpoint(model, f"./saved_models/{NAME}_best.pth", optimizer, device)
+    NAME += "_c"
 else:
     epoch_start = 0
+
 
 scaler = GradScaler()
 torch.cuda.empty_cache()

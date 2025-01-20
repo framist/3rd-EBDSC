@@ -13,6 +13,8 @@ from scipy import signal
 from sklearn.metrics import accuracy_score
 import numpy as np
 
+from typing import Optional
+
 from my_tools import compute_topk_freqs
 
 
@@ -52,7 +54,7 @@ class Demodulator:
         b, a = signal.butter(8, cutoff_freq / self.nyquist, btype="low")
         return signal.filtfilt(b, a, s)
 
-    def down_conversion(self, iq_data: np.ndarray, symbol_width_absl: float | int):
+    def demod(self, iq_data: np.ndarray, symbol_width_absl):
         """解调主函数
 
         Args:
@@ -80,6 +82,7 @@ class Demodulator:
             return np.stack([s.real, s.imag], axis=1)
 
         # - 2. 基带低通滤波
+        assert symbol_width_absl is not None
         s = self._lowpass_filter(s, 1 / (symbol_width_absl) * self.bandwidth_ratio)
 
         return np.stack([s.real, s.imag], axis=1)
@@ -175,6 +178,12 @@ class EBDSC3rdLoader(Dataset):
         test_file_lst = [name for name in os.listdir(self.root_dir) if name.endswith(".csv")]
         test_file_lst = [os.path.join(self.root_dir, name) for name in test_file_lst]
         self.samples = test_file_lst
+        self.symbol_widths = [None] * len(self.samples)
+
+    def test_update_demod(self, demodulator, symbol_widths):
+        self.demodulator = demodulator
+        self.symbol_widths = symbol_widths
+        print("Demodulator updated.")
 
     def __len__(self):
         return len(self.samples)
@@ -224,9 +233,9 @@ class EBDSC3rdLoader(Dataset):
 
             # - 带通信号解调
             if self.demodulator is not None:
-                IQ_data = self.demodulator.down_conversion(
+                IQ_data = self.demodulator.demod(
                     IQ_data, symbol_width * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT
-                )  # TODO 此处先验
+                )  # TODO 此处先验;测试集
 
             ans = {
                 "code_sequence_aligned": torch.tensor(code_sequence_aligned, dtype=torch.long),  # [code_len]
@@ -234,6 +243,15 @@ class EBDSC3rdLoader(Dataset):
                 "symbol_width": torch.tensor(symbol_width, dtype=torch.float32),  # scalar
                 "code_sequence": torch.tensor(mapped_code_sequence, dtype=torch.long),  # [code_len]
             }
+        else:
+            # - 带通信号解调
+            if self.demodulator is not None:
+                if self.symbol_widths[idx] is None:
+                    IQ_data = self.demodulator.demod(IQ_data, None)
+                else:
+                    IQ_data = self.demodulator.demod(
+                        IQ_data, self.symbol_widths[idx] * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT
+                    )
 
         # - 标准化
         # IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)
@@ -322,7 +340,7 @@ def _sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_
     return mask
 
 
-def sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_rate: float = 0.3):
+def sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_rate: float = 1.0):
     """
     根据 ratio 采样码序列 (中心优先的采样)，并返回掩码。
     根据比例 ratio 选择要采样的码元区域，并确保采样从序列中心开始向外扩展。
@@ -344,6 +362,9 @@ def sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_r
         np.ndarray: 采样后的码序列掩码
         np.ndarray: 掩码
     """
+    if sample_rate == 1.0:
+        return np.ones(length, dtype=np.int64)
+
     # 计算每个码元内的采样数量
     num_samples = max(1, int(symbol_width_absl * sample_rate))  # 每个码元的采样点数，确保至少一个
     repeat_count = int(symbol_width_absl)  # 每个码元的宽度（取整）
@@ -375,7 +396,7 @@ def sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_r
 
 
 def repeat_and_pad_sequence(
-    symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0, sample_rate: float = 0.3
+    symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0, sample_rate: float = 1.0
 ):
     """code_sequence 拓展为 IQ 数据长度 len(mapped_code_sequence) = len(IQ_data)
     e.g.
@@ -471,7 +492,7 @@ def _reverse_sequence_from_logits(symbol_width_absl: float, expanded_logits: np.
 
 
 def reverse_sequence_from_logits_batch(
-    symbol_width_absl: torch.Tensor, expanded_logits: torch.Tensor, pad: int = 0, sample_rate: float = 0.3
+    symbol_width_absl: torch.Tensor, expanded_logits: torch.Tensor, pad: int = 0, sample_rate: float = 1.0
 ) -> torch.LongTensor:
     """从展开的 logits 序列恢复原始码序列，支持批处理
 
@@ -829,9 +850,11 @@ def compute_CQ_score(
     # 将序列转换为向量，并减去 code_map_offset
     true_vec = (code_seq_labels - code_map_offset).float() * combined_mask.float()  # [batch_size, max_seq_len]
     pred_vec = (code_seq_preds - code_map_offset).float() * combined_mask.float()  # [batch_size, max_seq_len]
-    
-    # TODO acc
-    acc = accuracy_score(code_seq_labels[mask_labels].cpu(), code_seq_preds[mask_labels].cpu())
+
+    # acc
+    f1 = code_seq_labels == code_seq_preds
+    f2 = code_seq_labels != pad_idx
+    acc = (f1 & f2).sum(dim=1).float() / f2.sum(dim=1).float()
 
     # 计算余弦相似度
     dot_product = (true_vec * pred_vec).sum(dim=1)  # [batch_size]
@@ -859,7 +882,6 @@ def compute_CQ_score(
     return CQ_score, cosine_similarity, acc
 
 
-
 # 示例用法
 if __name__ == "__main__":
     # 示例数据
@@ -883,7 +905,6 @@ if __name__ == "__main__":
 
     pad_idx = 0
     code_map_offset = 1
-
 
     # for i in range(1, 32):
     #     l = torch.ones((2, 32)) + 5
