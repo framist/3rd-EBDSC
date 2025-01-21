@@ -63,6 +63,7 @@ parser.add_argument('--meanpool', action='store_true', default=False, help='是�
 parser.add_argument('--demod_step', type=int, default=0, help='Demodulator step')
 parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band width rate min=0.5')
 parser.add_argument('--sample_rate', type=float, default=1, help='sample masking rate')
+parser.add_argument('--freq_topk', type=int, default=4, help='基频采样 topk')
 
 parser.add_argument('--best_continue', type=int, default=0, help='是否继续训练，0 为否，> 1 为继续次数')
 
@@ -100,7 +101,8 @@ full_dataset = EBDSC3rdLoader(
     root_dir=root_dir,
     demodulator=Demodulator(
         bandwidth_ratio=parser_args.demod_br,
-        step=parser_args.demod_step
+        step=parser_args.demod_step,
+        freq_topk=parser_args.freq_topk
     ),
     code_map_offset=CODE_MAP_OFFSET,
     mod_uniq_symbol=parser_args.mod_uniq_sym,
@@ -124,7 +126,7 @@ is_debug = True if sys.gettrace() else False
 if is_debug:
     print("\n!!!!!!!!!!!!!!! Debugging !!!!!!!!!!!!!!!\n")
     assert parser_args.wandb == False, "Debugging 时不支持 wandb"
-    
+
 # %% 模型、优化器选择
 if parser_args.model == 'modernTCN':
     NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
@@ -152,23 +154,11 @@ if parser_args.model == 'modernTCN':
 
 
     # * CNN 使用的优化器
-
     learn_rate = parser_args.lr
     lr_step_size = parser_args.lr_step_size
-    # learn_rate = 4e-3
-    # learn_rate = 2e-4
-    # MIN_LR = 1e-4
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.99)
     # optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate)
-
-    # < 50  e 0.004
-    # < 100 e 0.002
-    # < 150 e 0.001
-    # < 200 e 0.0005
-    # < 250 e 0.00025
-    # < 300 e 0.000125
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5) # TODO last_epoch
 
 
 elif parser_args.model == 'Transformer':
@@ -190,9 +180,9 @@ elif parser_args.model == 'Transformer':
 
     # * TF 使用的优化器
     learn_rate = parser_args.lr
-    optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate)
+    # optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate) # TODO
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate) # TODO
     lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 16 ** -1.5)
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda) # TODO last_epoch
 
 
 elif parser_args.model == 'iTransformer':
@@ -211,7 +201,6 @@ elif parser_args.model == 'iTransformer':
     learn_rate = 0.
     optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate)
     lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 16 ** -1.5) 
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 elif parser_args.model == 'TimesNet':
     assert IF_LAERNABLE_EMB == True, "TimesNet 模型必须使用可学习的 emb. TODO"
@@ -231,13 +220,11 @@ elif parser_args.model == 'TimesNet':
     # 优化器
     learn_rate = 0.001
     optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
 
 else:
     raise ValueError('model 选择错误')
 
 
-        
 # 定义 SubsetLoss
 class MultiTaskLoss(nn.Module):
     def __init__(self, mod_weight=0.2, width_weight=0.3, seq_weight=0.5, pad_idx=0):
@@ -348,15 +335,24 @@ print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 print(f"{model=}")
 
 
-
-
 if parser_args.best_continue:
     for _ in range(parser_args.best_continue - 1):
         NAME += "_c"
     epoch_start = load_checkpoint(model, f"./saved_models/{NAME}_best.pth", optimizer, device)
     NAME += "_c"
+
 else:
-    epoch_start = 0
+    epoch_start = -1
+
+if parser_args.model in ["modernTCN", "TimesNet"]:
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start, verbose=True
+    )
+elif parser_args.model in ["Transformer", "iTransformer"]:
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=epoch_start, verbose=True)
+else:
+    raise ValueError("model 选择错误")
+epoch_start += 1
 
 
 scaler = GradScaler()
