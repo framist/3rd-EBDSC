@@ -65,7 +65,7 @@ parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band 
 parser.add_argument('--sample_rate', type=float, default=1, help='sample masking rate')
 parser.add_argument('--freq_topk', type=int, default=4, help='基频采样 topk')
 
-parser.add_argument('--best_continue', type=int, default=0, help='是否继续训练，0 为否，> 1 为继续次数')
+parser.add_argument('--best_continue', type=str, default=None, help='继续训练最佳模型，并重命名 e.g. --best_continue _c')
 
 parser_args = parser.parse_args()
 
@@ -119,6 +119,9 @@ PAD_IDX = 0  # 填充符号 ID
 MAX_CODE_LENGTH = parser_args.max_code_len
 MUTITASK_WEIGHTS = parser_args.mutitask_weights
 
+learn_rate = parser_args.lr
+lr_step_size = parser_args.lr_step_size
+
 if MUTITASK_WEIGHTS[1] == 0:
     assert parser_args.true_sym_width, "SW 为 0 时，必须使用真实符号宽度" 
 
@@ -154,8 +157,6 @@ if parser_args.model == 'modernTCN':
 
 
     # * CNN 使用的优化器
-    learn_rate = parser_args.lr
-    lr_step_size = parser_args.lr_step_size
     # optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.99)
     # optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate)
@@ -179,7 +180,6 @@ elif parser_args.model == 'Transformer':
     model = Model(configs=configs, wide_value_emb=False).to(device)
 
     # * TF 使用的优化器
-    learn_rate = parser_args.lr
     # optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate) # TODO
     optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate) # TODO
     lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 16 ** -1.5)
@@ -198,7 +198,6 @@ elif parser_args.model == 'iTransformer':
     model = Model(configs=configs, wide_value_emb=False).to(device)
 
     # * TF 使用的优化器
-    learn_rate = 0.
     optimizer = torch.optim.AdamW(model.parameters(), lr=learn_rate)
     lr_lambda = lambda step: (D ** -0.5) * min((step+1) ** -0.5, (step+1) * 16 ** -1.5) 
 
@@ -218,7 +217,6 @@ elif parser_args.model == 'TimesNet':
     model = Model(configs=configs, wide_value_emb=False).to(device)
 
     # 优化器
-    learn_rate = 0.001
     optimizer = torch.optim.RAdam(model.parameters(), lr=learn_rate)
 
 else:
@@ -278,6 +276,10 @@ class MultiTaskLoss(nn.Module):
         active_logits = code_seq_logits[code_seq_labels != self.pad_idx]
         active_labels = code_seq_labels[code_seq_labels != self.pad_idx]
 
+        # # TODO none pad mask
+        # active_logits = code_seq_logits
+        # active_labels = code_seq_labels
+        
         seq_loss = F.cross_entropy(active_logits, active_labels) / np.log(NUM_CODE_CLASSES)
 
         # TODO - 码序列损失 余弦相似度 方法
@@ -335,21 +337,18 @@ print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 print(f"{model=}")
 
 
-if parser_args.best_continue:
-    for _ in range(parser_args.best_continue - 1):
-        NAME += "_c"
+if parser_args.best_continue is not None:
     epoch_start = load_checkpoint(model, f"./saved_models/{NAME}_best.pth", optimizer, device)
-    NAME += "_c"
-
+    print(f"Continue from {NAME} at {epoch_start=}")
+    NAME += parser_args.best_continue
+    print(f"Renamed to {NAME}")
 else:
     epoch_start = -1
 
 if parser_args.model in ["modernTCN", "TimesNet"]:
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start, verbose=True
-    )
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)
 elif parser_args.model in ["Transformer", "iTransformer"]:
-    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=epoch_start, verbose=True)
+    lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=epoch_start)
 else:
     raise ValueError("model 选择错误")
 epoch_start += 1
@@ -485,8 +484,8 @@ for epoch in t:
     avg_sample_score = 0.2 * avg_MT_scores + 0.3 * avg_SW_scores + 0.5 * avg_CQ_scores
 
     tqdm.write(
-        f"[{epoch+1}/{MAX_TRAIN_EPOCH}] Train Loss: {avg_train_loss:.4f}, "
-        f"Val Loss: {avg_val_loss:.4f}, Val Score: {avg_sample_score:.2f}, "
+        f"[{epoch+1}/{MAX_TRAIN_EPOCH}] lr{lr_scheduler.get_last_lr()} Train Loss: {avg_train_loss:.4f}, "
+        f"Val Loss: {avg_val_loss:.4f}, Score: {avg_sample_score:.2f}, "
         f"MT: {avg_MT_scores:.2f}, SW: {avg_SW_scores:.2f}, CQ: {avg_CQ_scores:.2f}, acc: {avg_acc:.2f}, cs: {all_cs:.2f}"
     )
 

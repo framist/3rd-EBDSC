@@ -523,6 +523,7 @@ def reverse_sequence_from_logits_batch(
     repeat_counts = allowed_widths[torch.argmin(distances, dim=1)]
 
     # - 计算每个样本的原始序列长度
+    # TODO seq_len 这边依据的 IQ 实际上被填充了，所以这边的长度是填充后的长度
     orig_lens = torch.div(seq_len, repeat_counts, rounding_mode="floor")
     max_orig_len = orig_lens.max().item()
 
