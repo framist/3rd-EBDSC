@@ -21,7 +21,7 @@ import wandb
 from ebdsc3rd_datatools import *
 
 
-NAME = '3rd_sample_masking'
+NAME = '3rd'
 
 # plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei']  # 中文字体设置
 # plt.rcParams['axes.unicode_minus'] = False  # 负号显示设置
@@ -91,7 +91,9 @@ MAX_TRAIN_EPOCH = parser_args.max_epoch
 
 IF_LAERNABLE_EMB = True
 NAME += "_MeanPool" if parser_args.meanpool else "_AttnPool"
-NAME += f"_{parser_args.name}"
+
+# TODO
+# NAME += f"_{parser_args.name}"
 
 root_dir = "../train_data/"  # 替换为实际路径
 CODE_MAP_OFFSET = 1  # 码元映射偏移
@@ -334,8 +336,6 @@ val_loader = DataLoader(
 
 print(f"{NAME=}")
 print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-print(f"{model=}")
-
 
 if parser_args.best_continue is not None:
     epoch_start = load_checkpoint(model, f"./saved_models/{NAME}_best.pth", optimizer, device)
@@ -348,6 +348,7 @@ else:
 if parser_args.model in ["modernTCN", "TimesNet"]:
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)
 elif parser_args.model in ["Transformer", "iTransformer"]:
+    # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=epoch_start)
 else:
     raise ValueError("model 选择错误")
@@ -484,7 +485,7 @@ for epoch in t:
     avg_sample_score = 0.2 * avg_MT_scores + 0.3 * avg_SW_scores + 0.5 * avg_CQ_scores
 
     tqdm.write(
-        f"[{epoch+1}/{MAX_TRAIN_EPOCH}] lr{lr_scheduler.get_last_lr()} Train Loss: {avg_train_loss:.4f}, "
+        f"[{epoch+1}/{MAX_TRAIN_EPOCH}] lr{lr_scheduler.get_last_lr()[0]:.2e} Train Loss: {avg_train_loss:.4f}, "
         f"Val Loss: {avg_val_loss:.4f}, Score: {avg_sample_score:.2f}, "
         f"MT: {avg_MT_scores:.2f}, SW: {avg_SW_scores:.2f}, CQ: {avg_CQ_scores:.2f}, acc: {avg_acc:.2f}, cs: {all_cs:.2f}"
     )
@@ -530,6 +531,8 @@ for epoch in t:
     if parser_args.wandb:
         wandb.log(log, step=epoch)
 
+
+print(f"{model=}")
 
 # 打印一个批次的数据形状
 for batch in val_loader:
