@@ -133,10 +133,14 @@ if is_debug:
     assert parser_args.wandb == False, "Debugging 时不支持 wandb"
 
 # %% 模型、优化器选择
-if parser_args.model == 'modernTCN':
-    NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+if parser_args.model.startswith('modernTCN'):
     # from TCNmodelPosAll import ModernTCN_DC
-    from ModernTCN import ModernTCN_MutiTask
+    if 'FreTS' in parser_args.model:
+        from ModernTCN_FreTS import ModernTCN_MutiTask
+        NAME = f'freTSTCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+    else:
+        from ModernTCN import ModernTCN_MutiTask
+        NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
 
     # 不可结构重参数化：
     # model = ModernTCN_DC(INPUT_CHANNELS, WINDOW_SIZE, TAG_LEN, D=D,
@@ -345,7 +349,7 @@ if parser_args.best_continue is not None:
 else:
     epoch_start = -1
 
-if parser_args.model in ["modernTCN", "TimesNet"]:
+if parser_args.model in ["modernTCN", "TimesNet", "modernTCN_FreTS"]:
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)
 elif parser_args.model in ["Transformer", "iTransformer"]:
     # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)

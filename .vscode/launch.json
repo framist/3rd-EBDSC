@@ -13,6 +13,7 @@
             "console": "integratedTerminal",
             "args": [
                 // --num_layers 32 --ratio 4 --batch_size 16 --lr 0.00005 --lr_step_size 100 --max_epoch 100 --cuda 3 --wandb --name XL32l4r_c --tags all XXL --best_continue
+                "--model", "modernTCN_FreTS",
                 "--num_layers", "1",
                 "--ratio", "1",
                 "--batch_size", "2",
