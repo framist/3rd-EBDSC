@@ -94,7 +94,8 @@ class FreTS_Block(nn.Module):
         
         bias = x
         # [B, N, T, D]
-        x = self.MLP_channel(x, B, N, T)
+        x = x.to(torch.float32)
+        # x = self.MLP_channel(x, B, N, T)
         # [B, N, T, D]
         x = self.MLP_temporal(x, B, N, T)
         

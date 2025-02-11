@@ -93,7 +93,7 @@ IF_LAERNABLE_EMB = True
 NAME += "_MeanPool" if parser_args.meanpool else "_AttnPool"
 
 # TODO
-# NAME += f"_{parser_args.name}"
+NAME += f"_{parser_args.name}"
 
 root_dir = "../train_data/"  # 替换为实际路径
 CODE_MAP_OFFSET = 1  # 码元映射偏移

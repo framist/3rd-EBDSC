@@ -243,20 +243,22 @@ class EBDSC3rdLoader(Dataset):
                 "symbol_width": torch.tensor(symbol_width, dtype=torch.float32),  # scalar
                 "code_sequence": torch.tensor(mapped_code_sequence, dtype=torch.long),  # [code_len]
             }
-        else:
-            # - 带通信号解调
+        else:   # is_test
             if self.demodulator is not None:
-                if self.symbol_widths[idx] is None:
+                if self.demodulator.step == 1:
                     IQ_data = self.demodulator.demod(IQ_data, None)
-                else:
+                elif self.demodulator.step == 2:
                     IQ_data = self.demodulator.demod(
                         IQ_data, self.symbol_widths[idx] * EBDSC3rdLoader.SYMBOL_WIDTH_UNIT
                     )
-
+                    # ans = {
+                    #     "symbol_width_pre": torch.tensor(self.symbol_widths[idx], dtype=torch.float32),  # scalar
+                    # }
         # - 标准化
         # IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)
 
         return {
+            "idx": idx,
             "filename": os.path.basename(file_path),  # str 文件名，用于测试评估
             "IQ_data": torch.from_numpy(IQ_data).float(),  # [IQ_len, 2]
             "IQ_length": torch.tensor(len(IQ_data), dtype=torch.long),  # scalar 备用
@@ -515,7 +517,7 @@ def reverse_sequence_from_logits_batch(
 
     # - 根据先验选择最近的宽度值
     allowed_widths = torch.tensor(
-        [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], device=symbol_width_absl.device
+        [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], device=expanded_logits.device
     )
     # 计算与每个允许值的距离
     distances = torch.abs(symbol_width_absl.unsqueeze(1) - allowed_widths)
@@ -574,6 +576,7 @@ def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx
         IQ_lengths = torch.stack(IQ_length_list)  # [batch_size]
         if is_test:
             return {
+                "idx": [item["idx"] for item in batch],
                 "filename": filenames,
                 "IQ_data": IQ_padded,  # [batch_size, max_IQ_len, 2]
                 "IQ_length": IQ_lengths,  # [batch_size]
@@ -599,6 +602,7 @@ def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx
         code_mask = (code_seq_aligned_list != pad_idx).long()  # [batch_size, max_code_len]
 
         return {
+            "idx": [item["idx"] for item in batch],
             "IQ_data": IQ_padded,  # [batch_size, max_IQ_len, 2]
             "IQ_length": IQ_lengths,  # [batch_size]
             "code_sequence_aligned": code_seq_aligned_list,  # [batch_size, max_code_len]
