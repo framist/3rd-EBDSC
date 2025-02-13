@@ -63,7 +63,7 @@ parser.add_argument('--meanpool', action='store_true', default=False, help='是�
 parser.add_argument('--demod_step', type=int, default=0, help='Demodulator step')
 parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band width rate min=0.5')
 parser.add_argument('--sample_rate', type=float, default=1, help='sample masking rate')
-parser.add_argument('--freq_topk', type=int, default=4, help='基频采样 topk')
+parser.add_argument('--freq_topk', type=int, default=7, help='基频采样 topk')
 
 parser.add_argument('--best_continue', type=str, default=None, help='继续训练最佳模型，并重命名 e.g. --best_continue _c')
 
@@ -351,6 +351,8 @@ else:
 
 if parser_args.model in ["modernTCN", "TimesNet", "modernTCN_FreTS"]:
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)
+    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=8, eta_min=1e-5)
+    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer=optimizer, T_0=8, T_mult=2, eta_min=-1e-5)
 elif parser_args.model in ["Transformer", "iTransformer"]:
     # lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=epoch_start)

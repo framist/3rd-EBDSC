@@ -19,8 +19,11 @@ from my_tools import compute_topk_freqs
 
 
 class Demodulator:
-    def __init__(self, freq_topk: int = 4, bandwidth_ratio: float = 1, step: int = 0):
-        """初始化解调器"""
+    def __init__(self, freq_topk: int = 7, bandwidth_ratio: float = 1, step: int = 0):
+        """初始化解调器
+        topk > 0 表示选择 topk 个频率分量
+        topk < 0 表示随机频移 +- topk / 10
+        """
         self.freq_topk = freq_topk
         self.bandwidth_ratio = bandwidth_ratio
         self.nyquist = 1 / 2
@@ -71,17 +74,22 @@ class Demodulator:
         # - 带通滤波
         pass
 
-        # - 1. 下变频
-        # 找到  top-k 频率分量根据幅度作为概率随机采样载波频率
-        freqs, mags = compute_topk_freqs(iq_complex, topk=self.freq_topk)
-        # mags_softmax = F.softmax(torch.tensor(mags), dim=0).numpy()
-        carrier_freq = np.random.choice(freqs, p=mags / np.sum(mags))
+        # - STEP 1. 下变频
+        if self.freq_topk < 0:
+            # 随机选择频率
+            carrier_freq = np.random.uniform(self.freq_topk / 10, -self.freq_topk / 10)
+        elif self.freq_topk == 0:
+            raise NotImplementedError(f"Not implemented yet. {self.freq_topk}")
+        else:
+            # 找到  top-k 频率分量根据幅度作为概率随机采样载波频率
+            freqs, mags = compute_topk_freqs(iq_complex, topk=self.freq_topk)
+            carrier_freq = np.random.choice(freqs, p=mags / np.sum(mags))
 
         s = self._downconvert(iq_complex, carrier_freq)
         if self.step <= 1:
             return np.stack([s.real, s.imag], axis=1)
 
-        # - 2. 基带低通滤波
+        # - STEP 2. 基带低通滤波
         assert symbol_width_absl is not None
         s = self._lowpass_filter(s, 1 / (symbol_width_absl) * self.bandwidth_ratio)
 
