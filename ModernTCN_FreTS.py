@@ -246,20 +246,47 @@ class Stage(nn.Module):
         return x
 
 
+import math
+class PositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEmbedding, self).__init__()
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model).float()
+        pe.require_grad = False
+
+        position = torch.arange(0, max_len).float().unsqueeze(1)
+        div_term = (torch.arange(0, d_model, 2).float()
+                    * -(math.log(10000.0) / d_model)).exp()
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return self.pe[:, :x.size(-1)]
+    
+    
+
 class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长度，可以更换为输出的种类 num_classes
     def __init__(self, *, M, num_code_classes, num_mod_classes, D=128, large_sizes=51, ffn_ratio=2, num_layers=24, 
-                 small_size=5, small_kernel_merged=False, backbone_dropout=0., head_dropout=0., stem=False, mean_pool=False
+                 small_size=5, small_kernel_merged=False, backbone_dropout=0., head_dropout=0., stem=1, mean_pool=False
                  ):  # 如果能收敛就一点一点增加，在原来跑通的里面层数为
         # M, L, num_classes,
         super(ModernTCN_MutiTask, self).__init__()
         self.num_layers = num_layers
 
         # stem layer
-        if stem:
-            self.stem = nn.Sequential(
-                nn.Conv1d(1, D, kernel_size=1, stride=1),
+        # emb_type 0: fixed, 1: learnable, 2: learnable + pos
+        self.emb_type = stem
+        if self.emb_type >= 1:
+            self.value_embedding = nn.Sequential(
+                nn.Conv1d(1, D, kernel_size=1, bias=False),
                 nn.BatchNorm1d(D)
             )
+        if self.emb_type == 2:
+            self.position_embedding = PositionalEmbedding(d_model=D)
 
         # backbone
         self.stages = Stage(ffn_ratio, num_layers, large_size=large_sizes, small_size=small_size, dmodel=D,
@@ -299,13 +326,17 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # L = N = 1024 序列长 (P=1, S=1 时)
         # B = batch size
         
-        if hasattr(self, 'stem'):
+        if self.emb_type >= 1:
             # x: [B, L=1024, M=5] -> [B, M=5, L]
             B = x.shape[0]
             x = rearrange(x, 'b l m -> b m l')
             x = x.unsqueeze(2)  # [B, M, L] -> [B, M, 1, L]
             x = rearrange(x, 'b m r l -> (b m) r l')  # [B, M, 1, L] -> [B*M, 1, L]
-            x_emb = self.stem(x)
+            x_emb = self.value_embedding(x)
+            
+            if self.emb_type == 2:
+                x_pos = self.position_embedding(x).transpose(1, 2)
+                x_emb = x_pos + x_emb
             x_emb = rearrange(x_emb, '(b m) d n -> b m d n', b=B)  # [B*M, D, N] -> [B, M, D, N]
         else:            
             # x: [B, L=1024, M=5, pos_D=128] -> [B, M=5, D=128, L=1024]
@@ -346,40 +377,37 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
             if hasattr(m, 'merge_kernel'):
                 m.merge_kernel()
 
-# if __name__ == '__main__':
-#     from time import time
+if __name__ == '__main__':
+    from time import time
 
-#     past_series = torch.rand(10, 1024, 5, 128).cuda()
-#     # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
-#     model = ModernTCN_MutiTask(5, 12).cuda()
+    past_series = torch.rand(10, 1024, 2).cuda()
+    # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
+    model = ModernTCN_MutiTask(M=2, num_code_classes=32, num_mod_classes=12, stem=2).cuda()
+    
+    pred_series = model(past_series)
 
-#     start = time()
-#     pred_series = model(past_series)
-#     end = time()
-#     print(pred_series.shape, f"time {end - start}")
+    # model.structural_reparam()
 
-#     model.structural_reparam()
+    # start = time()
+    # pred_series = model(past_series)
+    # end = time()
 
-#     start = time()
-#     pred_series = model(past_series)
-#     end = time()
-
-#     print(pred_series.shape, f"time {end - start}")
+    # print(pred_series.shape, f"time {end - start}")
 
 
-#     past_series2 = torch.rand(10, 1024, 5).cuda()
-#     # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
-#     model = ModernTCN_MutiTask(5, 12, stem=True).cuda()
+    # past_series2 = torch.rand(10, 1024, 5).cuda()
+    # # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
+    # model = ModernTCN_MutiTask(5, 12, stem=True).cuda()
 
-#     start = time()
-#     pred_series = model(past_series2)
-#     end = time()
-#     print(pred_series.shape, f"time {end - start}")
+    # start = time()
+    # pred_series = model(past_series2)
+    # end = time()
+    # print(pred_series.shape, f"time {end - start}")
 
-#     model.structural_reparam()
+    # model.structural_reparam()
 
-#     start = time()
-#     pred_series = model(past_series2)
-#     end = time()
+    # start = time()
+    # pred_series = model(past_series2)
+    # end = time()
 
-#     print(pred_series.shape, f"time {end - start}")
+    # print(pred_series.shape, f"time {end - start}")

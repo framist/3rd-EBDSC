@@ -262,8 +262,9 @@ class EBDSC3rdLoader(Dataset):
                     # ans = {
                     #     "symbol_width_pre": torch.tensor(self.symbol_widths[idx], dtype=torch.float32),  # scalar
                     # }
-        # - 标准化
+        # TODO - 标准化目前会降低性能
         # IQ_data = (IQ_data - IQ_data.mean(axis=0)) / IQ_data.std(axis=0)
+        # IQ_data = (IQ_data) / IQ_data.std(axis=0)
 
         return {
             "idx": idx,

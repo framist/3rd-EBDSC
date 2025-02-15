@@ -38,6 +38,7 @@ parser.add_argument('--ratio', type=int, default=2, help='ffn ratio')
 parser.add_argument('--ls', type=int, default=51, help='large kernel sizes')
 parser.add_argument('--ss', type=int, default=5, help='small kernel size')
 parser.add_argument('--dp', type=float, default=0.5, help='drop out')
+parser.add_argument('--emb_type', type=int, default=1, help='embedding type, 0: fixed, 1: learnable, 2: learnable + pos')
 parser.add_argument('--max_epoch', type=int, default=64, help='max train epoch')
 
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
@@ -89,7 +90,7 @@ DROP_OUT = parser_args.dp # dropout 仅指分类头的。不能在主干。ref. 
 
 MAX_TRAIN_EPOCH = parser_args.max_epoch
 
-IF_LAERNABLE_EMB = True
+IF_LAERNABLE_EMB = parser_args.emb_type == 1
 NAME += "_MeanPool" if parser_args.meanpool else "_AttnPool"
 
 # TODO
@@ -157,7 +158,7 @@ if parser_args.model.startswith('modernTCN'):
             small_size=parser_args.ss,
             backbone_dropout=0.,
             head_dropout=DROP_OUT,
-            stem = IF_LAERNABLE_EMB,
+            stem = parser_args.emb_type,
             mean_pool=parser_args.meanpool
         ).to(device)
 
@@ -296,7 +297,7 @@ class MultiTaskLoss(nn.Module):
 if parser_args.wandb:
     wandb.init(
         project="TCN 3rd freq",
-        name=parser_args.name,
+        name=parser_args.name + (parser_args.best_continue if parser_args.best_continue is not None else ''),
         config=parser_args,
         tags=parser_args.tags,
         notes=NAME,
