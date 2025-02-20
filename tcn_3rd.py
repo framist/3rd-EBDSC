@@ -64,9 +64,11 @@ parser.add_argument('--meanpool', action='store_true', default=False, help='是�
 parser.add_argument('--demod_step', type=int, default=0, help='Demodulator step')
 parser.add_argument('--demod_br', type=float, default=1, help='Demodulator band width rate min=0.5')
 parser.add_argument('--sample_rate', type=float, default=1, help='sample masking rate')
-parser.add_argument('--freq_topk', type=int, default=7, help='基频采样 topk')
+parser.add_argument('--freq_topk', type=int, default=11, help='基频采样 topk')
+parser.add_argument('--form', type=str, default='algebraic', help='Return format for demodulated signal, in [algebraic, polar]')
 
 parser.add_argument('--best_continue', type=str, default=None, help='继续训练最佳模型，并重命名 e.g. --best_continue _c')
+
 
 parser_args = parser.parse_args()
 
@@ -105,7 +107,8 @@ full_dataset = EBDSC3rdLoader(
     demodulator=Demodulator(
         bandwidth_ratio=parser_args.demod_br,
         step=parser_args.demod_step,
-        freq_topk=parser_args.freq_topk
+        freq_topk=parser_args.freq_topk,
+        form=parser_args.form
     ),
     code_map_offset=CODE_MAP_OFFSET,
     mod_uniq_symbol=parser_args.mod_uniq_sym,

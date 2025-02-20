@@ -15,11 +15,11 @@ import numpy as np
 
 from typing import Optional
 
-from my_tools import compute_topk_freqs
+from my_tools import compute_topk_freqs, compute_weighted_freq
 
 
 class Demodulator:
-    def __init__(self, freq_topk: int = 7, bandwidth_ratio: float = 1, step: int = 0):
+    def __init__(self, freq_topk: int = 7, bandwidth_ratio: float = 1, step: int = 0, form: str = "algebraic"):
         """初始化解调器
         topk > 0 表示选择 topk 个频率分量
         topk < 0 表示随机频移 +- topk / 10
@@ -28,6 +28,8 @@ class Demodulator:
         self.bandwidth_ratio = bandwidth_ratio
         self.nyquist = 1 / 2
         self.step = step
+        assert form in ["algebraic", "polar"]
+        self.form = form
         # TODO 实现滤波器的选择
 
     def _downconvert(self, iq_data: np.ndarray, carrier_freq):
@@ -56,6 +58,18 @@ class Demodulator:
         """
         b, a = signal.butter(8, cutoff_freq / self.nyquist, btype="low")
         return signal.filtfilt(b, a, s)
+    
+    def _to_algebraic(self, s):
+        return np.stack([s.real, s.imag], axis=1)
+    
+    def _to_polar(self, s):
+        return np.stack([np.abs(s), np.angle(s)], axis=1)
+    
+    def _return(self, s):
+        if self.form == "algebraic":
+            return self._to_algebraic(s)
+        elif self.form == "polar":
+            return self._to_polar(s)
 
     def demod(self, iq_data: np.ndarray, symbol_width_absl):
         """解调主函数
@@ -64,13 +78,16 @@ class Demodulator:
             iq_data: IQ 数据，shape=(N,2)
             symbol_width_absl: 码元宽度
         """
-        if self.step <= 0:
-            return iq_data
 
         # 转换为复数 IQ 信号
         if not np.iscomplexobj(iq_data):
             iq_complex = iq_data[:, 0] + 1j * iq_data[:, 1]
+        else:
+            iq_complex = iq_data
 
+        if self.step <= 0:
+            return self._return(iq_complex)
+        
         # - 带通滤波
         pass
 
@@ -78,22 +95,23 @@ class Demodulator:
         if self.freq_topk < 0:
             # 随机选择频率
             carrier_freq = np.random.uniform(self.freq_topk / 10, -self.freq_topk / 10)
+            # carrier_freq = compute_weighted_freq(iq_complex) + np.random.uniform(self.freq_topk / 10, -self.freq_topk / 10)            
         elif self.freq_topk == 0:
-            raise NotImplementedError(f"Not implemented yet. {self.freq_topk}")
+            carrier_freq = compute_weighted_freq(iq_complex)
         else:
-            # 找到  top-k 频率分量根据幅度作为概率随机采样载波频率
+            # 找到 top-k 频率分量根据幅度作为概率随机采样载波频率
             freqs, mags = compute_topk_freqs(iq_complex, topk=self.freq_topk)
             carrier_freq = np.random.choice(freqs, p=mags / np.sum(mags))
 
         s = self._downconvert(iq_complex, carrier_freq)
         if self.step <= 1:
-            return np.stack([s.real, s.imag], axis=1)
+            return self._return(s)
 
         # - STEP 2. 基带低通滤波
         assert symbol_width_absl is not None
         s = self._lowpass_filter(s, 1 / (symbol_width_absl) * self.bandwidth_ratio)
 
-        return np.stack([s.real, s.imag], axis=1)
+        return self._return(s)
 
 
 class EBDSC3rdLoader(Dataset):

@@ -329,6 +329,28 @@ def compute_topk_freqs_r(data: np.ndarray, topk: int, sample_rate: float = 1):
     return freqs[idx], mags[idx]
 
 
+def compute_weighted_freq(data_complex: np.ndarray, sample_rate: float = 1, threshold: int = 25):
+    """计算 FFT 后的 mags 加权平均频率
+
+    Args:
+        data_complex: 复数形式的 IQ 采样数据
+        sample_rate: 采样率
+        threshold: 过滤的幅值阈值 TODO
+    Returns:
+        freq: 加权平均频率
+    """
+    n = len(data_complex)
+    freqs = np.fft.fftfreq(n, d=1 / sample_rate)
+    fft_values = np.fft.fft(data_complex)
+    mags = np.abs(fft_values)
+    # 过滤 mags > 50 的频率
+    freqs = freqs[mags > threshold]
+    mags = mags[mags > threshold]
+    # 加权平均频率
+    freq = np.sum(freqs * mags) / np.sum(mags)
+    return freq
+
+
 def compute_topk_freqs(data_complex: np.ndarray, topk: int, sample_rate: float = 1):
     if np.iscomplexobj(data_complex):
         return compute_topk_freqs_c(data_complex, topk, sample_rate = 1)
