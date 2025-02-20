@@ -40,11 +40,64 @@ class MeanPool(nn.Module):
         return x.mean(dim=self.dim)
 
 
+class FrequencyOffsetEstimator(nn.Module):
+    """时变相位生成器"""
+
+    def __init__(self, embed_size) -> None:
+        super().__init__()
+        self.embed_size = embed_size
+        self.pool = AttentionPool(embed_size * 2)
+        self.regressor = nn.Sequential(
+            nn.Linear(embed_size * 2, 1),  # 输出Δf 估计值
+        )
+
+    def forward(self, x):
+        T = x.size(-1)
+        x = rearrange(x, "b m d t -> b t (m d)")
+        x = self.pool(x)  # [B, 2*D]
+        delta_f = self.regressor(x)  # [B, 1]
+        return delta_f * torch.arange(T).to(x.device) / T  # 生成线性相位
+
+
+class ComplexPhaseCorrector(nn.Module):
+    """复数域相位校正层"""
+    def __init__(self):
+        super().__init__()
+        self.fc_real = nn.Linear(1, 1, bias=False)
+        self.fc_imag = nn.Linear(1, 1, bias=False)
+
+    def forward(self, x: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
+        # x: [B, 2, D, N]
+        x = rearrange(x, "b m d t -> b d t m")  # [B, D, T, 2] (实部 + 虚部)
+        # phi: [B,T]
+        # cos_phi = torch.cos(phi).unsqueeze(-1)  # [B,T,1]
+        cos_phi = rearrange(torch.cos(phi), "b t -> b 1 t 1")  # [B, 1, T, 1]
+        sin_phi = rearrange(torch.sin(phi), "b t -> b 1 t 1")
+        x_real = x[..., 0:1] * self.fc_real(cos_phi) - x[..., 1:2] * self.fc_imag(sin_phi)
+        x_imag = x[..., 0:1] * self.fc_imag(sin_phi) + x[..., 1:2] * self.fc_real(cos_phi)
+        x = torch.cat([x_real, x_imag], dim=-1)
+        x = rearrange(x, "b d t m -> b m d t")
+        return x
+
+
+class PhaseCorrectorBlock(nn.Module):
+    def __init__(self, embed_size):
+        super().__init__()
+        self.embed_size = embed_size
+        self.frequency_offset_estimator = FrequencyOffsetEstimator(embed_size)
+        self.complex_phase_corrector = ComplexPhaseCorrector()
+
+    def forward(self, x):
+        delta_f = self.frequency_offset_estimator(x)
+        x_corrected = self.complex_phase_corrector(x, delta_f)
+        return x_corrected + x
+
+
 class LayerNorm(nn.Module):
 
     def __init__(self, channels, eps=1e-6, data_format="channels_last"):
         super(LayerNorm, self).__init__()
-        self.norm = nn.Layernorm(channels)
+        self.norm = nn.LayerNorm(channels)
 
     def forward(self, x):
 
@@ -190,27 +243,41 @@ class Block(nn.Module):
         self.ffn_ratio = dff//dmodel
         
         self.freTS_block = FreTS_Block(embed_size=dmodel, hidden_size=dff)
-
+        
+        
     def forward(self, x):
-        # - freTS
-        x = self.freTS_block(x)
+        
+        # freTS 块位置备选 1 - default
+        x = x + self.freTS_block(x)
 
-        # - modern TCN
+        # = modern TCN
         input = x
         B, M, D, N = x.shape
+        
+        # freTS 块位置备选 2
+        # x = self.freTS_block(x)
+        
+        # - DWConv
         x = x.reshape(B, M*D, N)
         x = self.dw(x)
         x = x.reshape(B, M, D, N)
+        
+        # - BN
         x = x.reshape(B*M, D, N)
         x = self.norm(x)
         x = x.reshape(B, M, D, N)
+        
+        # freTS 块位置备选 4        
+        # x = self.freTS_block(x)
+        
+        # - ConvFFN1 Groups: M
         x = x.reshape(B, M * D, N)
-
         x = self.ffn1drop1(self.ffn1pw1(x))
         x = self.ffn1act(x)
         x = self.ffn1drop2(self.ffn1pw2(x))
         x = x.reshape(B, M, D, N)
 
+        # - ConvFFN2 Groups: D
         x = x.permute(0, 2, 1, 3)
         x = x.reshape(B, D * M, N)
         x = self.ffn2drop1(self.ffn2pw1(x))
@@ -219,6 +286,7 @@ class Block(nn.Module):
         x = x.reshape(B, D, M, N)
         x = x.permute(0, 2, 1, 3)
 
+        # - Residual
         x = input + x        
         
         return x
@@ -266,8 +334,7 @@ class PositionalEmbedding(nn.Module):
 
     def forward(self, x):
         return self.pe[:, :x.size(-1)]
-    
-    
+
 
 class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长度，可以更换为输出的种类 num_classes
     def __init__(self, *, M, num_code_classes, num_mod_classes, D=128, large_sizes=51, ffn_ratio=2, num_layers=24, 
@@ -280,12 +347,16 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # stem layer
         # emb_type 0: fixed, 1: learnable, 2: learnable + pos
         self.emb_type = stem
-        if self.emb_type >= 1:
+        if self.emb_type == 1:
+            self.value_embedding = nn.Sequential(
+                nn.Conv1d(1, D, kernel_size=1, bias=True),
+                nn.BatchNorm1d(D)
+            )
+        elif self.emb_type == 2:
             self.value_embedding = nn.Sequential(
                 nn.Conv1d(1, D, kernel_size=1, bias=False),
                 nn.BatchNorm1d(D)
             )
-        if self.emb_type == 2:
             self.position_embedding = PositionalEmbedding(d_model=D)
 
         # backbone
@@ -321,7 +392,10 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
 
         # # with pool
         # self.classificationhead = nn.Linear(D, num_classes)
-
+        
+        # - 相位校正
+        # self.phase_corrector = PhaseCorrectorBlock(embed_size=D)
+        
     def forward(self, x: torch.Tensor):
         # L = N = 1024 序列长 (P=1, S=1 时)
         # B = batch size
@@ -336,14 +410,16 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
             
             if self.emb_type == 2:
                 x_pos = self.position_embedding(x).transpose(1, 2)
-                x_emb = x_pos + x_emb
+                x_emb = x_pos * x_emb
             x_emb = rearrange(x_emb, '(b m) d n -> b m d n', b=B)  # [B*M, D, N] -> [B, M, D, N]
         else:            
             # x: [B, L=1024, M=5, pos_D=128] -> [B, M=5, D=128, L=1024]
             x_emb = rearrange(x, 'b l m d -> b m d l')
         
         x_emb = self.stages(x_emb)
-
+        # x_emb = self.phase_corrector(x_emb)  # [batch_size, seq_len, M, num_classes]
+        
+        
         # 在展平之前，[64, 5, 64, 1024] 要做序列标注任务 则 [64,5,1024,12] 将 5 个特征维度聚合得到 [64,1024,12]
         # 本质是 [B, M, D, N] -> [B, L, classes],其中 L 为 1024，classes 为 12，且 N = L // S
         # 可以考虑使用更复杂的池化方式、添加 dropout 等来增强模型的表达能力。
@@ -364,10 +440,10 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # TODO mean 池化待验证
         global_feat = encoder_output # .mean(dim=1)  # [batch_size, d_model]
 
-        # 调制类型分类
+        # = 调制类型分类
         mod_logits = self.mod_classifier(global_feat)  # [batch_size, num_mod_classes]
 
-        # 码元宽度回归
+        # = 码元宽度回归
         symbol_width = self.symbol_width_regressor(global_feat).squeeze(-1)  # [batch_size]
         
         return mod_logits, symbol_width, code_seq_logits
@@ -381,7 +457,6 @@ if __name__ == '__main__':
     from time import time
 
     past_series = torch.rand(10, 1024, 2).cuda()
-    # 对应的参数含义为 M, L, T, 4 个序列特征，96 原输入长度 96，预测输出长度为 192
     model = ModernTCN_MutiTask(M=2, num_code_classes=32, num_mod_classes=12, stem=2).cuda()
     
     pred_series = model(past_series)

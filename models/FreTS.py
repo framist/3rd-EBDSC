@@ -92,14 +92,14 @@ class FreTS_Block(nn.Module):
         # embedding x: [B, N, T, D]
         B, N, T, D = x.shape
         
-        bias = x
+        # bias = x
         # [B, N, T, D]
         x = x.to(torch.float32)
         # x = self.MLP_channel(x, B, N, T)
         # [B, N, T, D]
         x = self.MLP_temporal(x, B, N, T)
         
-        x = x + bias
+        # x = x + bias
         return x
     
     def forward(self, x):
