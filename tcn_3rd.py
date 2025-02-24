@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.utils.data as Data
 from torch import Tensor, nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
 from tqdm import tqdm
 
 now = datetime.datetime.now().strftime('%m%d_%H-%M')
@@ -38,8 +38,9 @@ parser.add_argument('--ratio', type=int, default=2, help='ffn ratio')
 parser.add_argument('--ls', type=int, default=51, help='large kernel sizes')
 parser.add_argument('--ss', type=int, default=5, help='small kernel size')
 parser.add_argument('--dp', type=float, default=0.5, help='drop out')
-parser.add_argument('--emb_type', type=int, default=1, help='embedding type, 0: fixed, 1: learnable, 2: learnable + pos')
+parser.add_argument('--emb_type', type=int, default=1, help='embedding type, 0: fixed, 1: learnable, 2: learnable + pos, 3: my')
 parser.add_argument('--max_epoch', type=int, default=64, help='max train epoch')
+parser.add_argument('--label_smoothing', type=float, default=0.0, help='label smoothing')
 
 parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
 parser.add_argument('--lr_step_size', type=int, default=16, help='lr step size') # TODO
@@ -235,7 +236,7 @@ else:
 
 # 定义 SubsetLoss
 class MultiTaskLoss(nn.Module):
-    def __init__(self, mod_weight=0.2, width_weight=0.3, seq_weight=0.5, pad_idx=0):
+    def __init__(self, mod_weight=0.2, width_weight=0.3, seq_weight=0.5, pad_idx=0, label_smoothing=0.):
         super().__init__()
         # 归一化权重
         total_weight = mod_weight + width_weight + seq_weight
@@ -243,6 +244,7 @@ class MultiTaskLoss(nn.Module):
         self.width_weight = width_weight / total_weight
         self.seq_weight = seq_weight / total_weight
         self.pad_idx = pad_idx
+        self.label_smoothing = label_smoothing
 
     def forward(
         self,
@@ -267,7 +269,7 @@ class MultiTaskLoss(nn.Module):
             Tensor: 总损失
         """
         # - 调制类型损失
-        mod_loss = F.cross_entropy(mod_logits, mod_labels) / np.log(NUM_MOD_CLASSES)
+        mod_loss = F.cross_entropy(mod_logits, mod_labels, label_smoothing=self.label_smoothing) / np.log(NUM_MOD_CLASSES)
 
         # TODO - 码元宽度损失
         # width_loss = F.mse_loss(symbol_width_pred * 20., symbol_width_labels * 20.)
@@ -290,7 +292,7 @@ class MultiTaskLoss(nn.Module):
         # active_logits = code_seq_logits
         # active_labels = code_seq_labels
         
-        seq_loss = F.cross_entropy(active_logits, active_labels) / np.log(NUM_CODE_CLASSES)
+        seq_loss = F.cross_entropy(active_logits, active_labels, label_smoothing=self.label_smoothing) / np.log(NUM_CODE_CLASSES)
 
         # TODO - 码序列损失 余弦相似度 方法
 
@@ -310,7 +312,7 @@ if parser_args.wandb:
 
 if 0. in MUTITASK_WEIGHTS:
     print(f'Warning: 0 in {MUTITASK_WEIGHTS=}')
-criterion = MultiTaskLoss(*MUTITASK_WEIGHTS, pad_idx=PAD_IDX)
+criterion = MultiTaskLoss(*MUTITASK_WEIGHTS, pad_idx=PAD_IDX, label_smoothing=parser_args.label_smoothing)
 
 # 定义训练集和验证集的比例，例如 80% 训练，20% 验证
 train_size = int(0.9 * len(full_dataset))

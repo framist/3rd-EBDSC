@@ -316,7 +316,7 @@ class Stage(nn.Module):
 
 import math
 class PositionalEmbedding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
+    def __init__(self, d_model, max_len=2048):
         super(PositionalEmbedding, self).__init__()
         # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, d_model).float()
@@ -335,6 +335,41 @@ class PositionalEmbedding(nn.Module):
     def forward(self, x):
         return self.pe[:, :x.size(-1)]
 
+class myEmbedding(nn.Module):
+    """
+    模拟以下操作的固定嵌入层:
+    x: [B, L, M=2] -> emb [B, L, M=2, D]
+    M = 2 存储 IQ 分量
+    在嵌入维度 (D) 生产 `carrier_freq = torch.linspace(-0.1, 0.1, d_model)` 的频移信号
+    即在 D 的每一个维度:
+    iq_complex = iq_filtered[:, 0] + 1j * iq_filtered[:, 1]
+    sampling_rate = 1
+    t = np.arange(len(iq_complex)) / sampling_rate
+    local_carrier = np.exp(-2j * np.pi * carrier_freq * t)
+    demodulated_signal = iq_complex * local_carrier
+    """
+    def __init__(self, d_model, max_len=2048):
+        super().__init__()
+        carrier_freq = torch.linspace(-0.1, 0.1, d_model).view(1, 1, d_model)
+        t = torch.arange(max_len, dtype=torch.float).view(max_len, 1, 1)
+        carrier_real = torch.cos(-2 * math.pi * carrier_freq * t)
+        carrier_imag = torch.sin(-2 * math.pi * carrier_freq * t)
+        carrier = torch.stack([carrier_real, carrier_imag], dim=2)  # [max_len, 1, 2, d_model]
+        self.register_buffer('carrier', carrier.permute(1, 0, 2, 3))  # [1, max_len, 2, d_model]
+
+    def forward(self, x):
+        # x: [B, L, 2]
+        L = x.size(1)
+        c = self.carrier[:, :L]  # [1, L, 2, d_model]
+        x_real = x[..., 0].unsqueeze(-1)
+        x_imag = x[..., 1].unsqueeze(-1)
+        c_real = c[..., 0, :]
+        c_imag = c[..., 1, :]
+        emb_real = x_real * c_real - x_imag * c_imag
+        emb_imag = x_real * c_imag + x_imag * c_real
+        emb = torch.stack([emb_real, emb_imag], dim=2)  # [B, L, 2, d_model]
+        return emb
+    
 
 class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长度，可以更换为输出的种类 num_classes
     def __init__(self, *, M, num_code_classes, num_mod_classes, D=128, large_sizes=51, ffn_ratio=2, num_layers=24, 
@@ -358,7 +393,9 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
                 nn.BatchNorm1d(D)
             )
             self.position_embedding = PositionalEmbedding(d_model=D)
-
+        elif self.emb_type == 3:
+            self.value_embedding = myEmbedding(D)
+            
         # backbone
         self.stages = Stage(ffn_ratio, num_layers, large_size=large_sizes, small_size=small_size, dmodel=D,
                             nvars=M, small_kernel_merged=small_kernel_merged, drop=backbone_dropout)
@@ -397,11 +434,16 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # self.phase_corrector = PhaseCorrectorBlock(embed_size=D)
         
     def forward(self, x: torch.Tensor):
+        # x: [B, L, M=2]
         # L = N = 1024 序列长 (P=1, S=1 时)
         # B = batch size
-        
-        if self.emb_type >= 1:
-            # x: [B, L=1024, M=5] -> [B, M=5, L]
+        # M = 2 IQ 分量
+        if self.emb_type == 3:
+            x_emb = self.value_embedding(x) # [B, L, M=2, D]
+            x_emb = rearrange(x_emb, 'b l m d -> b m d l')  # [B, L, M=2, D] -> [B, M=2, D, L]
+            
+        elif self.emb_type >= 1:
+            # x: [B, L, M=2] -> [B, M=2, L]
             B = x.shape[0]
             x = rearrange(x, 'b l m -> b m l')
             x = x.unsqueeze(2)  # [B, M, L] -> [B, M, 1, L]
@@ -413,17 +455,12 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
                 x_emb = x_pos * x_emb
             x_emb = rearrange(x_emb, '(b m) d n -> b m d n', b=B)  # [B*M, D, N] -> [B, M, D, N]
         else:            
-            # x: [B, L=1024, M=5, pos_D=128] -> [B, M=5, D=128, L=1024]
+            # x: [B, L, M=2, pos_D=128] -> [B, M=2, D=128, L]
             x_emb = rearrange(x, 'b l m d -> b m d l')
         
         x_emb = self.stages(x_emb)
         # x_emb = self.phase_corrector(x_emb)  # [batch_size, seq_len, M, num_classes]
         
-        
-        # 在展平之前，[64, 5, 64, 1024] 要做序列标注任务 则 [64,5,1024,12] 将 5 个特征维度聚合得到 [64,1024,12]
-        # 本质是 [B, M, D, N] -> [B, L, classes],其中 L 为 1024，classes 为 12，且 N = L // S
-        # 可以考虑使用更复杂的池化方式、添加 dropout 等来增强模型的表达能力。
-
         # Flatten 将预测的长度拉开，把嵌入的维度拉开
         # [B, M, D, N] -> [B, M*D, N]
         cls1 = rearrange(x_emb, 'b m d n -> b (m d) n')
@@ -431,7 +468,6 @@ class ModernTCN_MutiTask(nn.Module):  # T 在预测任务当中为预测的长�
         # maxpool
         # cls1 = torch.max(x_emb, dim=1)[0]    # [B, M, D, N] -> [B, D, N]
 
-        # 转换为 [64, 1024, 64]
         encoder_output = cls1.permute(0, 2, 1)
 
         code_seq_logits = self.sortinghead(encoder_output) # [batch_size, seq_len, 1, num_classes]
@@ -457,7 +493,7 @@ if __name__ == '__main__':
     from time import time
 
     past_series = torch.rand(10, 1024, 2).cuda()
-    model = ModernTCN_MutiTask(M=2, num_code_classes=32, num_mod_classes=12, stem=2).cuda()
+    model = ModernTCN_MutiTask(M=2, num_code_classes=32, num_mod_classes=12, stem=3).cuda()
     
     pred_series = model(past_series)
 

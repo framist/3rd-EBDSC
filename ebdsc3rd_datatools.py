@@ -15,7 +15,7 @@ import numpy as np
 
 from typing import Optional
 
-from my_tools import compute_topk_freqs, compute_weighted_freq
+from my_tools import compute_topk_freqs, compute_weighted_topk_freq
 
 
 class Demodulator:
@@ -94,10 +94,10 @@ class Demodulator:
         # - STEP 1. 下变频
         if self.freq_topk < 0:
             # 随机选择频率
-            carrier_freq = np.random.uniform(self.freq_topk / 10, -self.freq_topk / 10)
-            # carrier_freq = compute_weighted_freq(iq_complex) + np.random.uniform(self.freq_topk / 10, -self.freq_topk / 10)            
+            # carrier_freq = np.random.uniform(self.freq_topk / 10, -self.freq_topk / 10)
+            carrier_freq = compute_weighted_topk_freq(iq_complex, topk=11) + np.random.uniform(self.freq_topk / 10, -self.freq_topk / 10)            
         elif self.freq_topk == 0:
-            carrier_freq = compute_weighted_freq(iq_complex)
+            carrier_freq = compute_weighted_topk_freq(iq_complex, topk=11)
         else:
             # 找到 top-k 频率分量根据幅度作为概率随机采样载波频率
             freqs, mags = compute_topk_freqs(iq_complex, topk=self.freq_topk)
