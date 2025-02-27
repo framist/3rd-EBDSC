@@ -32,6 +32,14 @@ class FreTS_Block(nn.Module):
         y = self.FreMLP(B, N, L, x, self.r2, self.i2, self.rb2, self.ib2)
         x = torch.fft.irfft(y, n=L, dim=2, norm="ortho")
         return x
+    
+    # frequency temporal learner 复数输入
+    def MLP_temporal_complex(self, x, B, L):
+        # [B, T, D]
+        x = torch.fft.fft(x, dim=1, norm='ortho')  # FFT on L dimension
+        y = self.FreMLP_complex(B, L, x, self.r2, self.i2, self.rb2, self.ib2)
+        x = torch.fft.ifft(y, n=L, dim=1, norm="ortho")
+        return x
 
     # frequency channel learner
     def MLP_channel(self, x, B, N, L):
@@ -42,7 +50,7 @@ class FreTS_Block(nn.Module):
         y = self.FreMLP(B, L, N, x, self.r1, self.i1, self.rb1, self.ib1)
         x = torch.fft.irfft(y, n=N, dim=2, norm="ortho")
         x = x.permute(0, 2, 1, 3)
-        # [B, N, T, D]
+        # [B, N, T, D]``
         return x
 
     # frequency-domain MLPs
@@ -63,6 +71,29 @@ class FreTS_Block(nn.Module):
         o1_imag = F.relu(
             torch.einsum('bijd,dd->bijd', x.imag, r) + \
             torch.einsum('bijd,dd->bijd', x.real, i) + \
+            ib
+        )
+
+        y = torch.stack([o1_real, o1_imag], dim=-1)
+        y = F.softshrink(y, lambd=self.sparsity_threshold)
+        y = torch.view_as_complex(y)
+        return y
+
+    def FreMLP_complex(self, B, dimension, x, r, i, rb, ib):
+        o1_real = torch.zeros([B, dimension, self.embed_size],
+                              device=x.device)
+        o1_imag = torch.zeros([B, dimension, self.embed_size],
+                              device=x.device)
+
+        o1_real = F.relu(
+            torch.einsum('bid,dd->bid', x.real, r) - \
+            torch.einsum('bid,dd->bid', x.imag, i) + \
+            rb
+        )
+
+        o1_imag = F.relu(
+            torch.einsum('bid,dd->bid', x.imag, r) + \
+            torch.einsum('bid,dd->bid', x.real, i) + \
             ib
         )
 
@@ -102,10 +133,26 @@ class FreTS_Block(nn.Module):
         # x = x + bias
         return x
     
+
+    def block_complex(self, x: torch.FloatTensor):        
+        # embedding x: [B, N=2, T, D]
+        B, N, T, D = x.shape
+        # 转为复数 N=2 as complex number's real and imaginary part
+        x = x.permute(0, 2, 3, 1)
+        x = torch.complex(x[..., 0], x[..., 1])
+        x = x.to(torch.complex64)
+        
+        x = self.MLP_temporal_complex(x, B, T)
+        
+        # 转为实数
+        x = torch.stack([x.real, x.imag], dim=-1)
+        x = x.permute(0, 3, 1, 2)
+        return x
+    
     def forward(self, x):
         # x [Batch, Channel, D, Input length] ->
         # x [Batch, Channel, Input length, D]
         x = x.permute(0, 1, 3, 2)
-        x = self.block(x)
+        x = self.block_complex(x)
         x = x.permute(0, 1, 3, 2) # [Batch, Channel, D, Input length]
         return x
