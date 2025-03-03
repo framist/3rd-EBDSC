@@ -143,6 +143,9 @@ if parser_args.model.startswith('modernTCN'):
     if 'FreTS' in parser_args.model:
         from ModernTCN_FreTS import ModernTCN_MutiTask
         NAME = f'freTSTCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
+    elif 'FTDW' in parser_args.model:
+        from ModernTCN_FTDW import ModernTCN_MutiTask
+        NAME = f'FTDWTCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
     else:
         from ModernTCN import ModernTCN_MutiTask
         NAME = f'TCN_{parser_args.ls}KS{parser_args.ss}_{D}D{NUM_LAYERS}L{R}R{DROP_OUT*10:.0f}dp_{NAME}'
@@ -269,7 +272,9 @@ class MultiTaskLoss(nn.Module):
             Tensor: 总损失
         """
         # - 调制类型损失
-        mod_loss = F.cross_entropy(mod_logits, mod_labels, label_smoothing=self.label_smoothing) / np.log(NUM_MOD_CLASSES)
+        # TODO 此处 lable_smoothing 是负作用
+        # mod_loss = F.cross_entropy(mod_logits, mod_labels, label_smoothing=self.label_smoothing) / np.log(NUM_MOD_CLASSES)
+        mod_loss = F.cross_entropy(mod_logits, mod_labels) / np.log(NUM_MOD_CLASSES)
 
         # TODO - 码元宽度损失
         # width_loss = F.mse_loss(symbol_width_pred * 20., symbol_width_labels * 20.)
@@ -288,10 +293,11 @@ class MultiTaskLoss(nn.Module):
         active_logits = code_seq_logits[code_seq_labels != self.pad_idx]
         active_labels = code_seq_labels[code_seq_labels != self.pad_idx]
 
-        # # TODO none pad mask
+        # # none pad mask
         # active_logits = code_seq_logits
         # active_labels = code_seq_labels
         
+        # 此处 label_smoothing=0.1 对 acc 有些许提升
         seq_loss = F.cross_entropy(active_logits, active_labels, label_smoothing=self.label_smoothing) / np.log(NUM_CODE_CLASSES)
 
         # TODO - 码序列损失 余弦相似度 方法
@@ -319,6 +325,7 @@ train_size = int(0.9 * len(full_dataset))
 val_size = len(full_dataset) - train_size
 
 # 随机划分数据集
+# TODO 设定固定种子
 train_subset, val_subset = random_split(full_dataset, [train_size, val_size])
 
 print(f"Train samples: {len(train_subset)}, Val samples: {len(val_subset)}")
@@ -355,7 +362,7 @@ if parser_args.best_continue is not None:
 else:
     epoch_start = -1
 
-if parser_args.model in ["modernTCN", "TimesNet", "modernTCN_FreTS"]:
+if parser_args.model in ["modernTCN", "TimesNet", "modernTCN_FreTS", "modernTCN_FTDW"]:
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_step_size, gamma=0.5, last_epoch=epoch_start)
     # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=8, eta_min=1e-5)
     # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer=optimizer, T_0=8, T_mult=2, eta_min=-1e-5)

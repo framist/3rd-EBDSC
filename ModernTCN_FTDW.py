@@ -315,28 +315,32 @@ class Block(nn.Module):
         x = x.permute(0, 2, 3, 1)
         x = torch.complex(x[..., 0], x[..., 1]) # x: [B, D, T]
         
-        # x = x.to(torch.complex64)   # todo
+        # amp 时 T 不是 2 的幂次方时，cuFFT 会报错，需要 x.to(torch.complex64)
+        # cuFFT only supports dimensions whose sizes are powers of two when computing in half precision
+        # 但是实际上好像更慢了
+        # x = x.to(torch.complex64)
 
         # - FFT
         x = torch.fft.fft(x, dim=2, norm='ortho')  # FFT on T dimension        
         
-        # - 频域 DWConv
-        conv_real_out = self.fdw_real(x.real)
-        conv_imag_out = self.fdw_imag(x.imag)
-        
-        # 交叉项组合
-        y_real = conv_real_out - conv_imag_out
-        y_imag = conv_real_out + conv_imag_out
+        # - 频域 DWConv 交叉项组合
+        y_real = (self.fdw_real(x.real) - self.fdw_imag(x.imag)) / math.sqrt(T)
+        y_imag = (self.fdw_real(x.imag) + self.fdw_imag(x.real)) / math.sqrt(T)
 
         # # - TODO BN
         # x = torch.stack([y_real, y_imag], dim=-1) # x: [B, D, T, 2]        
         # x = rearrange(x, 'b d t m -> (b m) d t')
-        # x = self.norm(x)
+        # x = self.fnorm(x)   # <- fix
         # x = rearrange(x, '(b m) d t -> b d t m', b=B)        
-        # x = torch.complex(x[..., 0], x[..., 1])
-        # x = x.to(torch.complex64) # x: complex [B, D, T]
+        # x = torch.complex(x[..., 0], x[..., 1])  # x: complex [B, D, T]
         
+        # # - w/o BN
         x = torch.complex(y_real, y_imag)
+        
+        # amp 时 T 不是 2 的幂次方时，cuFFT 会报错，需要 x.to(torch.complex64)
+        # cuFFT only supports dimensions whose sizes are powers of two when computing in half precision
+        # 但是实际上好像更慢了 好像也不是
+        # x = x.to(torch.complex64)
         
         # - FreMLP
         # x: complex [B, D, T] -> [B, T, D]
@@ -355,12 +359,13 @@ class Block(nn.Module):
     
         
     def forward(self, x: torch.Tensor):
-        # = 频域 DWConv MLP
         x = x + self.fre_DWConv_MLP(x)
         
         # = modern TCN
         input = x
         B, M, D, N = x.shape
+        
+        # x = self.fre_DWConv_MLP(x)
         
         
         # - DWConv

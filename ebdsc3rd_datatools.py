@@ -600,6 +600,10 @@ def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx
         IQ_padded = torch.nn.utils.rnn.pad_sequence(
             IQ_data_list, batch_first=True, padding_value=pad_idx
         )  # [batch_size, max_IQ_len, 2]
+        # TODO 填充 I/Q 数据 max_IQ_len == 2048 -> cuFFT only supports dimensions whose sizes are powers of two when computing in half precision
+        # 但是实际上好像更慢了
+        IQ_padded = F.pad(IQ_padded, (0, 0, 0, 2048 - IQ_padded.size(1)), value=pad_idx) 
+        
         IQ_lengths = torch.stack(IQ_length_list)  # [batch_size]
         if is_test:
             return {
@@ -619,12 +623,15 @@ def make_collate_fn(*, data_aug: bool = False, code_map_offset: int = 1, pad_idx
         code_seq_aligned_list = torch.nn.utils.rnn.pad_sequence(
             code_seq_aligned_list, batch_first=True, padding_value=pad_idx
         )  # [batch_size, max_code_len]
-
+        # TODO 填充 max_IQ_len == 2048 -> cuFFT only supports dimensions whose sizes are powers of two when computing in half precision
+        # 但是实际上好像更慢了
+        code_seq_aligned_list = F.pad(code_seq_aligned_list, (0, 2048 - code_seq_aligned_list.size(1)), value=pad_idx)
+        
         # 填充 code_sequence
         code_padded = torch.nn.utils.rnn.pad_sequence(
             code_seq_list, batch_first=True, padding_value=pad_idx
         )  # [batch_size, max_code_len]
-
+        
         # 创建 code_sequence 的掩码（1 表示有效，0 表示填充）
         code_mask = (code_seq_aligned_list != pad_idx).long()  # [batch_size, max_code_len]
 
