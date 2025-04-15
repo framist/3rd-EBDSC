@@ -375,17 +375,17 @@ def sample_masking(symbol_width_absl: float, length: int, pad: int = 0, sample_r
     根据比例 ratio 选择要采样的码元区域，并确保采样从序列中心开始向外扩展。
     保证至少采样一次中心点。
 
-    e.g.
+    e.g.,
         |<------->| = symbol_width_absl
         [1, 1, 1, 2, 2, 2, 3... 1] ->
-        [0, 1, 0, 0, 1, 0,  ...  ] (mask based on ratio e.g. 1/3)
+        [0, 1, 0, 0, 1, 0,  ...  ] (mask based on ratio e.g., 1/3)
         |<---------------------->| = length == len(IQ_data)
 
     Args:
         symbol_width_absl (float): 码元宽度
         length (int): IQ 数据长度
         pad (int): 填充值
-        ratio (float): 采样比例（0 到 1 之间，表示采样比例）
+        sample_rate (float): 采样比例（0 到 1 之间，表示采样比例）
 
     Returns:
         np.ndarray: 采样后的码序列掩码
@@ -428,22 +428,24 @@ def repeat_and_pad_sequence(
     symbol_width_absl: float, length: int, code_sequence: np.ndarray, pad: int = 0, sample_rate: float = 1.0
 ):
     """code_sequence 拓展为 IQ 数据长度 len(mapped_code_sequence) = len(IQ_data)
-    e.g.
+    
+    e.g.,
         |<------->| = symbol_width_absl
         [1,       2,       3... 1] ->
         [1, 1, 1, 2, 2, 2, 3... 1]
         |<---------------------->| = length == len(IQ_data)
-        [0, 1, 0, 0, 1, 0,  ...  ] (mask based on ratio e.g. 1/3)
+        [0, 1, 0, 0, 1, 0,  ...  ] (mask based on ratio e.g., 1/3)
     计算每个码元需要重复的次数
 
-    TODO 根据 ratio 只保留中心的采样，但至少采样一次，额外返回 mask 提供掩码
-
     Args:
-        symbol_width_absl (float): 码元宽度。
-        length (int): IQ 数据长度。
-        code_sequence (np.ndarray): 码序列。
+        symbol_width_absl (float): 码元宽度
+        length (int): IQ 数据长度
+        code_sequence (np.ndarray): 码序列
+        pad (int): 填充值
+        sample_rate (float): 采样比例（0 到 1 之间，表示采样比例）
+        
     Returns:
-        np.ndarray: 拓展后的码序列。
+        np.ndarray: 拓展后的码序列
     """
     repeat_count = int(symbol_width_absl)  # 数据集中此项一定是整数
     # 使用 numpy 的 repeat 函数展开码序列
@@ -524,8 +526,7 @@ def reverse_sequence_from_logits_batch(
     symbol_width_absl: torch.Tensor, expanded_logits: torch.Tensor, pad: int = 0, sample_rate: float = 1.0
 ) -> torch.LongTensor:
     """从展开的 logits 序列恢复原始码序列，支持批处理
-
-    TODO 根据 ratio 只根据中心的采样恢复
+    根据 sample_rate 只根据中心的采样恢复
 
     先验 set(symbol_widths_absl)：
     {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
