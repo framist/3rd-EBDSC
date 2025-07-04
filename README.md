@@ -18,6 +18,10 @@
 
 完整演示文稿请见[此](asserts/EBDSC第三届电磁大数据非凡挑战赛决赛答辩-QiiQ-publish.pdf)
 
+## 数据集
+
+> 链接: https://pan.baidu.com/s/1Bndc0RbxV5gWtDRFq3MtZA?pwd=8yig 提取码: 8yig
+
 ---
 
 by Framist & KylinGR - 「QiiQ」战队 - 如有任何问题，请联系我们
