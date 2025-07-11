@@ -25,6 +25,8 @@
 ### 数据集
 
 > 链接: https://pan.baidu.com/s/1Bndc0RbxV5gWtDRFq3MtZA?pwd=8yig 提取码: 8yig
+> 
+> **注意：该链接仅包含训练集数据。测试集未公开发布，如需测试集请联系比赛主办方。**
 
 1、训练集介绍：
 
