@@ -5,10 +5,34 @@
 > [!TIP]
 > [第二届金奖（第一名）作品](https://github.com/framist/2nd-EBDSC)
 
+## 🚀 训练速度优化（解决70+小时训练问题）
+
+如果遇到训练时间过长的问题，请使用优化后的训练脚本：
+
+```bash
+# A6000 GPU 快速训练 (8-12小时)
+python tcn_3rd_optimized.py --config a6000_fast
+
+# RTX4090 平衡配置 (10-15小时)  
+python tcn_3rd_optimized.py --config rtx4090_balanced
+
+# 快速测试配置 (1-2小时)
+python tcn_3rd_optimized.py --config quick_test
+```
+
+**查看所有配置**: `python training_configs.py --list`  
+**详细使用说明**: 请查看 [USAGE_GUIDE.md](USAGE_GUIDE.md)
+
 ## 文件结构
 
-- 模型训练代码入口：`tcn_3rd.py`
-- 在线提交测试相关代码：`model_upload/`
+### 训练相关
+- **`tcn_3rd.py`** - 原始训练脚本
+- **`tcn_3rd_optimized.py`** - 优化训练脚本（推荐使用）
+- **`training_configs.py`** - 训练配置和优化建议
+- **`tcn_eval_only.py`** - 独立评估脚本（仅测试）
+
+### 提交相关
+- **`model_upload/`** - 在线提交测试相关代码
 
 ## 方案概述
 
