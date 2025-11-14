@@ -29,7 +29,7 @@
 
 ![](asserts/image2.png)
 
-完整演示文稿请见[此](asserts/EBDSC第三届电磁大数据非凡挑战赛决赛答辩-QiiQ-publish.pdf)
+完整演示文稿请见[此](asserts/EBDSC第三届电磁大数据非凡挑战赛决赛答辩-QiiQ-publish.pdf)，转录文稿见[此](方案说明.md)
 
 ## 赛事信息
 
